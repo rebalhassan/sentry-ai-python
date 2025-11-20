@@ -37,7 +37,7 @@ def test_incremental_parsing():
         print(f"   Content length: {len(initial_content)} bytes")
         
         assert len(chunks) > 0, "Should create chunks from initial content"
-        assert position1 == len(initial_content), "Position should match content length"
+        assert position1 == temp_file.stat().st_size, "Position should match content length"
         
         # Append new content to file
         with open(temp_file, 'a', encoding='utf-8') as f:

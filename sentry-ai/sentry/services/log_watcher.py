@@ -235,7 +235,10 @@ class LogWatcher:
         """
         if source_id in self.watching:
             watch = self.watching[source_id]
-            self.observer.unschedule(watch)
+            try:
+                self.observer.unschedule(watch)
+            except (KeyError, Exception) as e:
+                logger.warning(f"Error unscheduling watch for {source_id}: {e}")
             del self.watching[source_id]
             logger.info(f"✅ Stopped watching source: {source_id}")
         else:
