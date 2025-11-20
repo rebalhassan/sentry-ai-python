@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sentry-AI specific
+.sentry-ai/
+*.db
+*.faiss
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

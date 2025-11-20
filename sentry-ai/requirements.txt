@@ -1,0 +1,22 @@
+# Core
+rich>=13.7.0
+textual>=0.47.1
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# AI/ML
+sentence-transformers>=2.2.2
+faiss-cpu>=1.7.4
+ollama>=0.1.6
+
+# Data & Storage
+numpy>=1.24.0
+sqlite-utils>=3.35
+
+# File & System Monitoring
+watchdog>=3.0.0
+pywin32>=306; sys_platform == 'win32'
+
+# Utilities
+python-dateutil>=2.8.2
+click>=8.1.7
