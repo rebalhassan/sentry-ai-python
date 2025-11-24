@@ -9,10 +9,10 @@ import logging
 from typing import List, Tuple, Optional
 from datetime import datetime
 
-from ..core.models import LogChunk, QueryResult
+from ..core.models import LogChunk, LogSource, SourceType, QueryResult
 from ..core.database import db
 from ..core.config import settings
-
+            
 from .embedding import get_embedder
 from .vectorstore import get_vector_store
 from .llm import get_llm_client
@@ -267,6 +267,57 @@ class RAGService:
         
         try:
             logger.info(f"Batch indexing {len(chunks)} chunks...")
+
+            # Step 0: Ensure all sources exist (fix for foreign key constraint)
+            # Extract unique source IDs from chunks
+            unique_source_ids = set(chunk.source_id for chunk in chunks)
+            
+            for source_id in unique_source_ids:
+                # Check if source exists
+                existing_source = db.get_source(source_id)
+                
+                if not existing_source:
+                    # Create the source automatically
+                    logger.info(f"Creating missing source: {source_id}")
+                    
+                    # Determine source type and name from source_id pattern
+                    if source_id.startswith("evt_"):
+                        source_type = SourceType.EVENTVIEWER
+                        # Extract log name (e.g., "evt_System" -> "System")
+                        log_name = source_id[4:]  # Remove "evt_" prefix
+                        name = f"{log_name} Event Log"
+                        eventlog_name = log_name
+                        path = None
+                    elif source_id.startswith("file_"):
+                        source_type = SourceType.FILE
+                        # Extract file name (e.g., "file_mylog.txt" -> "mylog.txt")
+                        file_name = source_id[5:]  # Remove "file_" prefix
+                        name = file_name
+                        eventlog_name = None
+                        path = None  # We don't have the actual path here
+                    else:
+                        # Default to FILE type
+                        source_type = SourceType.FILE
+                        name = source_id
+                        eventlog_name = None
+                        path = None
+                    
+                    # Create the source
+                    source = LogSource(
+                        id=source_id,
+                        name=name,
+                        source_type=source_type,
+                        path=path,
+                        eventlog_name=eventlog_name
+                    )
+                    
+                    try:
+                        db.add_source(source)
+                        logger.info(f"✅ Created source: {name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to create source {source_id}: {e}")
+                        # Continue anyway - might be a race condition
+            
             
             # Step 1: Add to database
             db.add_chunks_batch(chunks)

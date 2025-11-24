@@ -110,7 +110,28 @@ class EventViewerReader:
                     break
                 
                 # Get event time
-                event_time = datetime.fromtimestamp(int(event.TimeGenerated))
+                # event.TimeGenerated can be int (timestamp) or pywintypes.datetime
+                if isinstance(event.TimeGenerated, (int, float)):
+                    event_time = datetime.fromtimestamp(int(event.TimeGenerated))
+                elif isinstance(event.TimeGenerated, datetime):
+                    # Already a Python datetime
+                    event_time = event.TimeGenerated
+                else:
+                    # pywintypes.datetime - convert to Python datetime using components
+                    # This avoids the int() conversion issue
+                    try:
+                        event_time = datetime(
+                            event.TimeGenerated.year,
+                            event.TimeGenerated.month,
+                            event.TimeGenerated.day,
+                            event.TimeGenerated.hour,
+                            event.TimeGenerated.minute,
+                            event.TimeGenerated.second,
+                            event.TimeGenerated.microsecond
+                        )
+                    except AttributeError:
+                        # Last resort - try current time
+                        event_time = datetime.now()
                 
                 # Filter by start_time
                 if start_time and event_time < start_time:
@@ -138,7 +159,26 @@ class EventViewerReader:
         log_level = self.EVENT_TYPE_MAP.get(event_type, LogLevel.UNKNOWN)
         
         # Get event time
-        timestamp = datetime.fromtimestamp(int(event.TimeGenerated))
+        if isinstance(event.TimeGenerated, (int, float)):
+            timestamp = datetime.fromtimestamp(int(event.TimeGenerated))
+        elif isinstance(event.TimeGenerated, datetime):
+            # Already a Python datetime
+            timestamp = event.TimeGenerated
+        else:
+            # pywintypes.datetime - convert to Python datetime using components
+            try:
+                timestamp = datetime(
+                    event.TimeGenerated.year,
+                    event.TimeGenerated.month,
+                    event.TimeGenerated.day,
+                    event.TimeGenerated.hour,
+                    event.TimeGenerated.minute,
+                    event.TimeGenerated.second,
+                    event.TimeGenerated.microsecond
+                )
+            except AttributeError:
+                # Last resort - try current time
+                timestamp = datetime.now()
         
         # Build content
         source_name = event.SourceName

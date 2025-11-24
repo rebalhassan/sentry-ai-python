@@ -39,13 +39,13 @@ class Settings(BaseSettings):
     
     # ===== VECTOR SEARCH =====
     top_k_results: int = 10  # Return top 10 most similar chunks
-    similarity_threshold: float = 0.7  # Minimum similarity score (0-1)
+    similarity_threshold: float = 0.3  # Minimum similarity score (0-1)
     use_reranking: bool = True  # Use BM25 reranking after vector search
     
     # ===== LLM SETTINGS =====
     ollama_host: str = "http://localhost:11434"
-    llm_model: str = "deepseek-r1:1.5b" 
-    llm_temperature: float = 0.1  # Low = factual, High = creative
+    llm_model: str = "smollm2:360m"
+    llm_temperature: float = 0.5  # Low = factual, High = creative
     llm_context_window: int = 4096  # Max tokens for context
     llm_max_tokens: int = 1024  # Max tokens in response
     llm_timeout: int = 60  # Seconds before timeout

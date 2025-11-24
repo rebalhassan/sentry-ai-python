@@ -7,17 +7,11 @@ Generates natural language responses based on retrieved context
 import logging
 from typing import List, Dict, Optional
 import json
-
-try:
-    import ollama
-except ImportError:
-    ollama = None
-
-from ..core.config import settings
+import ollama
 from ..core.models import LogChunk
+from ..core.config import settings
 
 logger = logging.getLogger(__name__)
-
 
 class LLMClient:
     """
@@ -346,6 +340,39 @@ Provide a clear, actionable answer based ONLY on the log entries above. If the l
                 'temperature': self.temperature,
                 'error': str(e)
             }
+
+    def list_models(self) -> List[str]:
+        """
+        List available Ollama models
+        
+        Returns:
+            List of model names (e.g. ["llama3:8b", "mistral"])
+        """
+        try:
+            # List available models
+            models_response = self.client.list()
+            
+            # Handle different response formats
+            if isinstance(models_response, dict):
+                models = models_response.get('models', [])
+            else:
+                models = models_response
+            
+            # Extract model names safely
+            model_names = []
+            for m in models:
+                if isinstance(m, dict):
+                    # Try different keys
+                    name = m.get('name') or m.get('model') or str(m)
+                    model_names.append(name)
+                else:
+                    model_names.append(str(m))
+            
+            return sorted(model_names)
+            
+        except Exception as e:
+            logger.error(f"Failed to list models: {e}")
+            return []
     
     def __repr__(self):
         return f"<LLMClient(model={self.model}, host={self.host})>"
