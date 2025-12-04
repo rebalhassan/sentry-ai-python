@@ -87,9 +87,13 @@ class RAGService:
         logger.info(f"  top_k={top_k}, threshold={similarity_threshold}")
         
         try:
-            # Step 1: Embed the query
+            # Step 0: Expand the query (if it's a natural language question)
+            # We keep the original query for the final LLM answer, but use expanded for search
+            expanded_query = self.llm.expand_query(query_text)
+            
+            # Step 1: Embed the query (using expanded version)
             logger.debug("Step 1: Embedding query...")
-            query_vector = self.embedder.embed_text(query_text)
+            query_vector = self.embedder.embed_text(expanded_query)
             
             # Step 2: Search vector store
             logger.debug("Step 2: Searching vector store...")
@@ -319,19 +323,46 @@ class RAGService:
                         # Continue anyway - might be a race condition
             
             
-            # Step 1: Add to database
+            # Step 1: Add to database (store original content)
             db.add_chunks_batch(chunks)
-            
-            # Step 2: Embed all contents
-            contents = [chunk.content for chunk in chunks]
-            vectors = self.embedder.embed_batch(contents)
-            
-            # Step 3: Add to vector store
-            chunk_ids = [chunk.id for chunk in chunks]
+
+            # Step 2: CONTEXTUAL EMBEDDING - Group chunks by source
+            chunks_by_source = {}
+            for chunk in chunks:
+                if chunk.source_id not in chunks_by_source:
+                    chunks_by_source[chunk.source_id] = []
+                chunks_by_source[chunk.source_id].append(chunk)
+
+            # Prepare contextualized contents for embedding
+            contents_to_embed = []
+            chunks_ordered = []
+
+            for source_id, source_chunks in chunks_by_source.items():
+                source_name = source_names.get(source_id, "Unknown Source")
+                
+                # Generate context summary using LLM
+                logger.info(f"🧠 Generating context for '{source_name}' ({len(source_chunks)} chunks)...")
+                context_summary = self.llm.generate_context_summary(source_chunks, source_name)
+                
+                # Apply context to each chunk
+                for chunk in source_chunks:
+                    # Store context in metadata
+                    chunk.metadata['context_summary'] = context_summary
+                    
+                    # Create contextualized content for embedding
+                    contextualized_content = f"Context: {context_summary}\n\nLog Entry:\n{chunk.content}"
+                    contents_to_embed.append(contextualized_content)
+                    chunks_ordered.append(chunk)
+
+            # Step 3: Embed all contextualized contents
+            vectors = self.embedder.embed_batch(contents_to_embed)
+
+            # Step 4: Add to vector store
+            chunk_ids = [chunk.id for chunk in chunks_ordered]
             faiss_ids = self.vector_store.add(vectors, chunk_ids)
-            
-            # Step 4: Update chunks with embedding IDs
-            for chunk, faiss_id in zip(chunks, faiss_ids):
+
+            # Step 5: Update chunks with embedding IDs
+            for chunk, faiss_id in zip(chunks_ordered, faiss_ids):
                 chunk.embedding_id = faiss_id
             
             logger.info(f"✅ Indexed {len(chunks)} chunks")

@@ -38,17 +38,25 @@ class Settings(BaseSettings):
     min_chunk_size: int = 50  # Don't create tiny chunks
     
     # ===== VECTOR SEARCH =====
-    top_k_results: int = 10  # Return top 10 most similar chunks
-    similarity_threshold: float = 0.3  # Minimum similarity score (0-1)
+    top_k_results: int = 20  # Return top 20 most similar chunks
+    similarity_threshold: float = 0.25  # Minimum similarity score (0-1)
     use_reranking: bool = True  # Use BM25 reranking after vector search
     
     # ===== LLM SETTINGS =====
     ollama_host: str = "http://localhost:11434"
-    llm_model: str = "smollm2:360m"
-    llm_temperature: float = 0.5  # Low = factual, High = creative
-    llm_context_window: int = 4096  # Max tokens for context
+    llm_model: str = "tinyllama:latest"
+    llm_temperature: float = 0.70  # Low = factual, High = creative
+    llm_context_window: int = 2048  # Max tokens for context
     llm_max_tokens: int = 1024  # Max tokens in response
     llm_timeout: int = 60  # Seconds before timeout
+    
+    # Context generation (for embeddings) - uses a smaller/faster model
+    context_model: str = "tinyllama:latest"  # Small model for fast context summaries
+    context_temperature: float = 0.3  # Lower for consistent summaries
+    context_max_tokens: int = 150  # Keep summaries concise
+    
+    # Query Expansion
+    query_expansion_temperature: float = 0.2  # Low for deterministic expansions
     
     # ===== INDEXING =====
     max_file_size_mb: int = 100  # Skip files larger than this

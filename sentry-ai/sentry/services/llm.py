@@ -252,6 +252,212 @@ Provide a clear, actionable answer based ONLY on the log entries above. If the l
         
         return "\n".join(context_lines)
     
+    def generate_context_summary(self, chunks: List[LogChunk], source_name: str = None) -> str:
+        """
+        Generate a contextual summary for a batch of log chunks
+        
+        Uses a dedicated smaller model (settings.context_model) for speed.
+        
+        Args:
+            chunks: List of log chunks from the same source
+            source_name: Optional name of the source (file/eventlog)
+            
+        Returns:
+            A concise summary describing the log context
+        """
+        if not chunks:
+            return ""
+        
+        from ..core.config import settings
+        
+        # Sample up to 10 chunks for context (to avoid token limits)
+        sample_size = min(10, len(chunks))
+        sample_content = "\n".join([
+            f"[{chunk.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{chunk.log_level.value.upper()}] {chunk.content[:200]}"
+            for chunk in chunks[:sample_size]
+        ])
+        
+        # Extract metadata hints
+        source_info = source_name or "Unknown Source"
+        if chunks[0].metadata.get('file'):
+            source_info = chunks[0].metadata['file']
+        elif chunks[0].metadata.get('event_id'):
+            source_info = f"Event Log (EventID: {chunks[0].metadata['event_id']})"
+        
+        # Build prompt for context generation
+        prompt = f"""Analyze these log entries from "{source_info}" and provide a concise 2-3 sentence summary.
+
+Focus on:
+- What system/application these logs are from
+- The general context or purpose
+- Any notable patterns or themes
+
+Sample log entries ({sample_size} of {len(chunks)} total):
+{sample_content}
+
+Provide ONLY the summary, no preamble."""
+        
+        try:
+            # Use dedicated context model for speed
+            logger.debug(f"Using context model: {settings.context_model}")
+            context_client = ollama.Client(host=self.host)
+            response = context_client.chat(
+                model="smollm2:135m",
+                messages=[
+                    {'role': 'system', 'content': 'You are a log analysis expert. Provide concise, technical summaries.'},
+                    {'role': 'user', 'content': prompt}
+                ],
+                options={
+                    'temperature': settings.context_temperature,
+                    'num_predict': settings.context_max_tokens,
+                }
+            )
+            summary = response['message']['content'].strip()
+            logger.debug(f"Generated context summary: {summary[:100]}...")
+            return summary
+        except Exception as e:
+            logger.warning(f"Failed to generate context summary: {e}")
+            return f"Log entries from {source_info} containing {len(chunks)} entries."
+
+    
+    def generate_context_summary(self, chunks: List[LogChunk], source_name: str = None) -> str:
+        """
+        Generate a contextual summary for a batch of log chunks
+        
+        This summary captures the overall context of the log file/source,
+        which will be prepended to individual chunks during embedding.
+        
+        Args:
+            chunks: List of log chunks from the same source
+            source_name: Optional name of the source (file/eventlog)
+            
+        Returns:
+            A concise summary describing the log context
+        """
+        if not chunks:
+            return ""
+        
+        # Sample up to 10 chunks for context (to avoid token limits)
+        sample_size = min(10, len(chunks))
+        sample_chunks = chunks[:sample_size]
+        
+        # Build sample content
+        sample_content = "\n".join([
+            f"[{chunk.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{chunk.log_level.value.upper()}] {chunk.content[:200]}"
+            for chunk in sample_chunks
+        ])
+        
+        # Extract metadata hints
+        source_info = source_name or "Unknown Source"
+        if chunks[0].metadata.get('file'):
+            source_info = chunks[0].metadata['file']
+        elif chunks[0].metadata.get('event_id'):
+            source_info = f"Event Log (EventID: {chunks[0].metadata['event_id']})"
+        
+        # Build prompt for context generation
+        prompt = f"""Analyze these log entries from "{source_info}" and provide a concise 2-3 sentence summary.
+
+Focus on:
+- What system/application these logs are from
+- The general context or purpose
+- Any notable patterns or themes
+
+Sample log entries ({sample_size} of {len(chunks)} total):
+{sample_content}
+
+Provide ONLY the summary, no preamble."""
+        
+        try:
+            # Generate summary with low temperature for consistency
+            summary = self.generate(
+                prompt,
+                system_prompt="You are a log analysis expert. Provide concise, technical summaries.",
+                temperature=0.3,
+                max_tokens=150
+            )
+            
+            # Clean up the summary
+            summary = summary.strip()
+            
+            logger.debug(f"Generated context summary: {summary[:100]}...")
+            return summary
+            
+        except Exception as e:
+            logger.warning(f"Failed to generate context summary: {e}")
+            # Fallback to simple metadata-based context
+            return f"Log entries from {source_info} containing {len(chunks)} entries."
+
+    def expand_query(self, query: str) -> str:
+        """
+        Expand user query into technical terms for better semantic search
+        
+        Uses a small, fast model (smollm2:135m) to translate vague queries
+        into specific error messages or technical terms.
+        
+        Args:
+            query: User's original query
+            
+        Returns:
+            Expanded query string with OR operators
+        """
+        # Hardcoded model as requested
+        expansion_model = "smollm2:135m"
+        
+        prompt = f"""You are a query expansion system for a log analysis tool.
+Your job is to translate user queries into technical terms found in logs.
+
+Rules:
+1. Return ONLY the expanded query terms joined by OR
+2. Do not include the original query if it's vague
+3. Focus on error messages, status codes, and technical keywords
+4. Keep it simple and concise
+
+Examples:
+User: "why is it slow?"
+You: high latency OR slow response time OR timeout OR performance degradation
+
+User: "checkout errors"
+You: checkout service errors OR payment failures OR 500 errors in /checkout endpoint
+
+User: "database issues"
+You: connection refused OR deadlock OR query timeout OR slow query
+
+User: "{query}"
+You:"""
+
+        try:
+            logger.debug(f"Expanding query: '{query}' using {expansion_model}")
+            
+            # Create a temporary client for this specific request to ensure we use the right model
+            # and don't mess with the main client's state
+            client = ollama.Client(host=self.host)
+            
+            response = client.chat(
+                model=expansion_model,
+                messages=[
+                    {'role': 'user', 'content': prompt}
+                ],
+                options={
+                    'temperature': settings.query_expansion_temperature,
+                    'num_predict': 50,  # Short response
+                    'stop': ["\\n", "User:"]  # Stop at newline or next example
+                }
+            )
+            
+            expanded = response['message']['content'].strip()
+            
+            # Fallback if empty
+            if not expanded:
+                logger.warning("Query expansion returned empty string")
+                return query
+                
+            logger.info(f"Expanded: '{query}' -> '{expanded}'")
+            return expanded
+            
+        except Exception as e:
+            logger.warning(f"Query expansion failed: {e}")
+            return query  # Fallback to original query
+
     def chat(
         self,
         messages: List[Dict[str, str]],
