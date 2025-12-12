@@ -5,11 +5,19 @@ Generates natural language responses based on retrieved context
 """
 
 import logging
+import time
 from typing import List, Dict, Optional
 import json
 import ollama
 from ..core.models import LogChunk
 from ..core.config import settings
+
+# Try to import tenacity for retry logic, fallback to simple retry if not installed
+try:
+    from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+    TENACITY_AVAILABLE = True
+except ImportError:
+    TENACITY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -138,29 +146,49 @@ class LLMClient:
             'content': prompt
         })
         
-        try:
-            logger.debug(f"Sending request to Ollama ({self.model})...")
-            logger.debug(f"  Prompt length: {len(prompt)} chars")
-            
-            response = self.client.chat(
-                model=self.model,
-                messages=messages,
-                options={
-                    'temperature': temperature,
-                    'num_predict': max_tokens,
-                }
-            )
-            
-            # Extract the response text
-            answer = response['message']['content']
-            
-            logger.debug(f"✅ Got response ({len(answer)} chars)")
-            
-            return answer
-            
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            raise
+        return self._generate_with_retry(messages, temperature, max_tokens)
+    
+    def _generate_with_retry(self, messages: List[Dict], temperature: float, max_tokens: int) -> str:
+        """
+        Internal method with retry logic for LLM generation
+        Retries up to 3 times with exponential backoff on connection errors
+        """
+        max_attempts = 3
+        base_wait = 2  # seconds
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.debug(f"Sending request to Ollama ({self.model})... (attempt {attempt}/{max_attempts})")
+                
+                response = self.client.chat(
+                    model=self.model,
+                    messages=messages,
+                    options={
+                        'temperature': temperature,
+                        'num_predict': max_tokens,
+                    }
+                )
+                
+                # Extract the response text
+                answer = response['message']['content']
+                
+                logger.debug(f"✅ Got response ({len(answer)} chars)")
+                
+                return answer
+                
+            except (ConnectionError, TimeoutError) as e:
+                # Retry on connection/timeout errors
+                if attempt < max_attempts:
+                    wait_time = base_wait * (2 ** (attempt - 1))  # Exponential backoff
+                    logger.warning(f"LLM request failed (attempt {attempt}/{max_attempts}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"LLM generation failed after {max_attempts} attempts: {e}")
+                    raise
+            except Exception as e:
+                # Don't retry on other errors (e.g., model not found)
+                logger.error(f"LLM generation failed: {e}")
+                raise
     
     def generate_with_context(
         self,
@@ -252,73 +280,6 @@ Provide a clear, actionable answer based ONLY on the log entries above. If the l
         
         return "\n".join(context_lines)
     
-    def generate_context_summary(self, chunks: List[LogChunk], source_name: str = None) -> str:
-        """
-        Generate a contextual summary for a batch of log chunks
-        
-        Uses a dedicated smaller model (settings.context_model) for speed.
-        
-        Args:
-            chunks: List of log chunks from the same source
-            source_name: Optional name of the source (file/eventlog)
-            
-        Returns:
-            A concise summary describing the log context
-        """
-        if not chunks:
-            return ""
-        
-        from ..core.config import settings
-        
-        # Sample up to 10 chunks for context (to avoid token limits)
-        sample_size = min(10, len(chunks))
-        sample_content = "\n".join([
-            f"[{chunk.timestamp.strftime('%Y-%m-%d %H:%M:%S')}] [{chunk.log_level.value.upper()}] {chunk.content[:200]}"
-            for chunk in chunks[:sample_size]
-        ])
-        
-        # Extract metadata hints
-        source_info = source_name or "Unknown Source"
-        if chunks[0].metadata.get('file'):
-            source_info = chunks[0].metadata['file']
-        elif chunks[0].metadata.get('event_id'):
-            source_info = f"Event Log (EventID: {chunks[0].metadata['event_id']})"
-        
-        # Build prompt for context generation
-        prompt = f"""Analyze these log entries from "{source_info}" and provide a concise 2-3 sentence summary.
-
-Focus on:
-- What system/application these logs are from
-- The general context or purpose
-- Any notable patterns or themes
-
-Sample log entries ({sample_size} of {len(chunks)} total):
-{sample_content}
-
-Provide ONLY the summary, no preamble."""
-        
-        try:
-            # Use dedicated context model for speed
-            logger.debug(f"Using context model: {settings.context_model}")
-            context_client = ollama.Client(host=self.host)
-            response = context_client.chat(
-                model="smollm2:135m",
-                messages=[
-                    {'role': 'system', 'content': 'You are a log analysis expert. Provide concise, technical summaries.'},
-                    {'role': 'user', 'content': prompt}
-                ],
-                options={
-                    'temperature': settings.context_temperature,
-                    'num_predict': settings.context_max_tokens,
-                }
-            )
-            summary = response['message']['content'].strip()
-            logger.debug(f"Generated context summary: {summary[:100]}...")
-            return summary
-        except Exception as e:
-            logger.warning(f"Failed to generate context summary: {e}")
-            return f"Log entries from {source_info} containing {len(chunks)} entries."
-
     
     def generate_context_summary(self, chunks: List[LogChunk], source_name: str = None) -> str:
         """

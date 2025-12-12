@@ -4,8 +4,10 @@ Embedding service for converting text to vectors
 Uses sentence-transformers with all-MiniLM-L6-v2
 """
 
+import hashlib
+from functools import lru_cache
 import numpy as np
-from typing import List, Union
+from typing import List, Union, Tuple
 from pathlib import Path
 import logging
 
@@ -51,6 +53,13 @@ class EmbeddingService:
             self.dimension = self.model.get_sentence_embedding_dimension()
             logger.info(f"✅ Model loaded. Embedding dimension: {self.dimension}")
             
+            # Initialize embedding cache for query embeddings
+            # This caches repeated queries to avoid recomputation
+            self._embedding_cache = {}
+            self._cache_hits = 0
+            self._cache_misses = 0
+            self._max_cache_size = 10000  # Max cached embeddings
+            
             # Verify it matches our config
             if self.dimension != settings.embedding_dimension:
                 logger.warning(
@@ -62,6 +71,68 @@ class EmbeddingService:
         except Exception as e:
             logger.error(f"Failed to load embedding model: {e}")
             raise
+    
+    def _get_text_hash(self, text: str) -> str:
+        """Generate a hash key for caching"""
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]
+    
+    def embed_text_cached(self, text: str) -> np.ndarray:
+        """
+        Embed text with caching for repeated queries
+        
+        For indexing large batches, use embed_batch() instead.
+        This is optimized for query-time embeddings where the same
+        queries may be repeated.
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            Cached or freshly computed embedding
+        """
+        if not text or not text.strip():
+            return np.zeros(self.dimension, dtype=np.float32)
+        
+        text_hash = self._get_text_hash(text)
+        
+        # Check cache
+        if text_hash in self._embedding_cache:
+            self._cache_hits += 1
+            logger.debug(f"Embedding cache hit (hits: {self._cache_hits})")
+            return self._embedding_cache[text_hash].copy()
+        
+        # Cache miss - compute embedding
+        self._cache_misses += 1
+        embedding = self.embed_text(text)
+        
+        # Add to cache (with LRU-like eviction if full)
+        if len(self._embedding_cache) >= self._max_cache_size:
+            # Remove oldest entry (first key in dict - Python 3.7+ maintains order)
+            oldest_key = next(iter(self._embedding_cache))
+            del self._embedding_cache[oldest_key]
+        
+        self._embedding_cache[text_hash] = embedding.copy()
+        return embedding
+    
+    @property
+    def cache_stats(self) -> dict:
+        """Get cache statistics for monitoring"""
+        total = self._cache_hits + self._cache_misses
+        hit_rate = self._cache_hits / total if total > 0 else 0.0
+        return {
+            "cache_size": len(self._embedding_cache),
+            "max_cache_size": self._max_cache_size,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "hit_rate": hit_rate
+        }
+    
+    def clear_cache(self):
+        """Clear the embedding cache"""
+        self._embedding_cache.clear()
+        self._cache_hits = 0
+        self._cache_misses = 0
+        logger.info("Embedding cache cleared")
     
     def embed_text(self, text: str) -> np.ndarray:
         """

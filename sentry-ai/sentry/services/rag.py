@@ -12,6 +12,7 @@ from datetime import datetime
 from ..core.models import LogChunk, LogSource, SourceType, QueryResult
 from ..core.database import db
 from ..core.config import settings
+from ..core.security import sanitize_query
             
 from .embedding import get_embedder
 from .vectorstore import get_vector_store
@@ -78,6 +79,18 @@ class RAGService:
         """
         start_time = time.time()
         
+        # Step 0: Sanitize input for security
+        query_text = sanitize_query(query_text)
+        
+        if not query_text:
+            return QueryResult(
+                answer="Please provide a valid query.",
+                sources=[],
+                confidence=0.0,
+                query_time=time.time() - start_time,
+                chunk_ids=[]
+            )
+        
         # Use defaults from settings if not provided
         top_k = top_k or settings.top_k_results
         similarity_threshold = similarity_threshold or settings.similarity_threshold
@@ -87,16 +100,16 @@ class RAGService:
         logger.info(f"  top_k={top_k}, threshold={similarity_threshold}")
         
         try:
-            # Step 0: Expand the query (if it's a natural language question)
+            # Step 1: Expand the query (if it's a natural language question)
             # We keep the original query for the final LLM answer, but use expanded for search
             expanded_query = self.llm.expand_query(query_text)
             
-            # Step 1: Embed the query (using expanded version)
-            logger.debug("Step 1: Embedding query...")
-            query_vector = self.embedder.embed_text(expanded_query)
+            # Step 2: Embed the query (using cached embedding for repeated queries)
+            logger.debug("Step 2: Embedding query...")
+            query_vector = self.embedder.embed_text_cached(expanded_query)
             
-            # Step 2: Search vector store
-            logger.debug("Step 2: Searching vector store...")
+            # Step 3: Search vector store
+            logger.debug("Step 3: Searching vector store...")
             chunk_ids, scores = self.vector_store.search_with_threshold(
                 query_vector,
                 k=top_k,
@@ -332,6 +345,15 @@ class RAGService:
                 if chunk.source_id not in chunks_by_source:
                     chunks_by_source[chunk.source_id] = []
                 chunks_by_source[chunk.source_id].append(chunk)
+
+            # Build source_names mapping (source_id -> display name)
+            source_names = {}
+            for source_id in chunks_by_source.keys():
+                source = db.get_source(source_id)
+                if source:
+                    source_names[source_id] = source.name
+                else:
+                    source_names[source_id] = "Unknown Source"
 
             # Prepare contextualized contents for embedding
             contents_to_embed = []

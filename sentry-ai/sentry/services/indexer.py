@@ -331,31 +331,179 @@ class LogIndexer:
     
     def _chunk_content(self, content: str) -> List[str]:
         """
-        Split content into overlapping chunks
+        Split content into semantically meaningful chunks
         
-        Uses settings.chunk_size and settings.chunk_overlap
+        Strategy:
+        1. Detect log entry boundaries (timestamps, log levels)
+        2. Split into individual log entries
+        3. Group entries into chunks respecting semantic boundaries
+        4. Ensure chunks don't exceed max size
+        
+        This preserves complete log entries and improves retrieval accuracy.
         """
-        chunks = []
-        size = settings.chunk_size
-        overlap = settings.chunk_overlap
-        
-        # Edge case: empty content
         if not content:
             return []
         
-        # Chunk with overlap
-        i = 0
-        while i < len(content):
-            chunk = content[i:i + size]
+        # Try semantic chunking first
+        entries = self._split_into_log_entries(content)
+        
+        if entries:
+            # Group entries into chunks
+            return self._group_entries_into_chunks(entries)
+        else:
+            # Fallback to sentence-based chunking for unstructured text
+            return self._chunk_by_sentences(content)
+    
+    def _split_into_log_entries(self, content: str) -> List[str]:
+        """
+        Split content into individual log entries based on common patterns
+        
+        Detects entry boundaries using:
+        - ISO timestamps (2024-01-15 10:30:45)
+        - Bracket timestamps ([2024-01-15], [10:30:45])
+        - Log levels at start of line (INFO, ERROR, etc.)
+        - Windows Event format
+        """
+        # Common log entry start patterns
+        LOG_ENTRY_PATTERNS = [
+            # ISO datetime: 2024-01-15 10:30:45 or 2024-01-15T10:30:45
+            r'^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}',
+            # Bracket datetime: [2024-01-15 10:30:45]
+            r'^\[\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}\]',
+            # Time only: [10:30:45] or 10:30:45,123
+            r'^\[?\d{2}:\d{2}:\d{2}[,.]?\d*\]?',
+            # Month format: Jan 15 10:30:45 or 15/Jan/2024
+            r'^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}',
+            r'^\d{1,2}/[A-Z][a-z]{2}/\d{4}',
+            # Log level at start: INFO, ERROR, WARN, DEBUG
+            r'^(INFO|ERROR|WARN|WARNING|DEBUG|CRITICAL|FATAL|TRACE)\s*[:\|\-\]]',
+            # Windows Event format: [Event ID: 1234]
+            r'^\[Event\s+ID:\s*\d+\]',
+        ]
+        
+        # Compile patterns
+        combined_pattern = '|'.join(f'({p})' for p in LOG_ENTRY_PATTERNS)
+        entry_start_regex = re.compile(combined_pattern, re.MULTILINE | re.IGNORECASE)
+        
+        lines = content.split('\n')
+        entries = []
+        current_entry_lines = []
+        
+        for line in lines:
+            # Check if this line starts a new entry
+            if entry_start_regex.match(line.strip()):
+                # Save previous entry if exists
+                if current_entry_lines:
+                    entry_text = '\n'.join(current_entry_lines).strip()
+                    if entry_text:
+                        entries.append(entry_text)
+                # Start new entry
+                current_entry_lines = [line]
+            else:
+                # Continue current entry (multi-line log entry)
+                current_entry_lines.append(line)
+        
+        # Don't forget the last entry
+        if current_entry_lines:
+            entry_text = '\n'.join(current_entry_lines).strip()
+            if entry_text:
+                entries.append(entry_text)
+        
+        # Only return entries if we found meaningful structure
+        # If we only got 1-2 big chunks, the detection probably failed
+        if len(entries) >= 3 or (len(entries) > 0 and all(len(e) < settings.chunk_size * 2 for e in entries)):
+            return entries
+        
+        return []  # Fallback to sentence-based chunking
+    
+    def _group_entries_into_chunks(self, entries: List[str]) -> List[str]:
+        """
+        Group log entries into chunks respecting semantic boundaries
+        
+        Groups entries until chunk_size is reached, then starts a new chunk.
+        Ensures we don't split individual entries.
+        """
+        chunks = []
+        current_chunk_entries = []
+        current_size = 0
+        
+        for entry in entries:
+            entry_size = len(entry)
             
-            # Only add if it meets minimum size (unless it's the last chunk)
-            if len(chunk) >= settings.min_chunk_size or i + size >= len(content):
-                chunks.append(chunk)
+            # If single entry exceeds chunk size, it becomes its own chunk
+            if entry_size > settings.chunk_size:
+                # Save current chunk if exists
+                if current_chunk_entries:
+                    chunks.append('\n\n'.join(current_chunk_entries))
+                    current_chunk_entries = []
+                    current_size = 0
+                
+                # Add oversized entry as its own chunk (will be truncated in embedding anyway)
+                chunks.append(entry)
+                continue
             
-            # Move forward by (size - overlap)
-            i += size - overlap
+            # Check if adding this entry exceeds chunk size
+            new_size = current_size + entry_size + 2  # +2 for separator
+            
+            if new_size > settings.chunk_size and current_chunk_entries:
+                # Save current chunk and start new one
+                chunks.append('\n\n'.join(current_chunk_entries))
+                current_chunk_entries = [entry]
+                current_size = entry_size
+            else:
+                # Add to current chunk
+                current_chunk_entries.append(entry)
+                current_size = new_size
+        
+        # Don't forget the last chunk
+        if current_chunk_entries:
+            chunks.append('\n\n'.join(current_chunk_entries))
         
         return chunks
+    
+    def _chunk_by_sentences(self, content: str) -> List[str]:
+        """
+        Fallback: Split by sentences for unstructured text
+        
+        Uses common sentence-ending patterns and respects word boundaries.
+        """
+        # Sentence-ending patterns
+        sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
+        
+        # Split into sentences
+        sentences = sentence_endings.split(content)
+        
+        if not sentences:
+            return [content] if content.strip() else []
+        
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            sentence_size = len(sentence)
+            
+            if current_size + sentence_size + 1 > settings.chunk_size and current_chunk:
+                # Save current chunk
+                chunks.append(' '.join(current_chunk))
+                current_chunk = [sentence]
+                current_size = sentence_size
+            else:
+                current_chunk.append(sentence)
+                current_size += sentence_size + 1
+        
+        # Don't forget last chunk
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+        
+        # Filter out tiny chunks
+        chunks = [c for c in chunks if len(c) >= settings.min_chunk_size]
+        
+        return chunks if chunks else [content[:settings.chunk_size]]
     
     def _detect_log_level(self, text: str) -> LogLevel:
         """
