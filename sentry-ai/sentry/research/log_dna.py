@@ -19,6 +19,34 @@ from drain3.template_miner_config import TemplateMinerConfig
 from collections import defaultdict
 import json
 from pathlib import Path
+import pandas as pd
+from datetime import datetime, timedelta
+
+# PM4Py imports
+try:
+    import pm4py
+    from pm4py.objects.log.obj import EventLog, Event, Trace
+    from pm4py.algo.discovery.heuristics import algorithm as heuristics_miner
+    from pm4py.visualization.petri_net import visualizer as pn_visualizer
+    PM4PY_AVAILABLE = True
+except ImportError:
+    PM4PY_AVAILABLE = False
+    print("⚠️  PM4Py not installed. Install with: pip install pm4py")
+
+# Fix Graphviz PATH issue on Windows
+import os
+import platform
+if platform.system() == "Windows":
+    graphviz_paths = [
+        r"C:\Program Files\Graphviz\bin",
+        r"C:\Program Files (x86)\Graphviz\bin",
+    ]
+    for gv_path in graphviz_paths:
+        if os.path.exists(gv_path) and gv_path not in os.environ["PATH"]:
+            os.environ["PATH"] += os.pathsep + gv_path
+            print(f"✅ Added Graphviz to PATH: {gv_path}")
+            break
+
 
 
 class LogDNAEncoder:
@@ -174,6 +202,114 @@ class LogDNAEncoder:
                 bar = "█" * (pct // 5)  # Visual bar
                 lines.append(f"  [{from_id}] -> [{to_id}]: {pct:3d}% {bar}")
         return "\n".join(lines)
+    
+    def to_event_log(self, cluster_ids: list[int], case_id: str = "case_1") -> 'EventLog':
+        """
+        Convert cluster IDs to PM4Py EventLog format.
+        
+        This creates a process mining event log where each cluster ID
+        becomes an activity in the process.
+        
+        Args:
+            cluster_ids: List of cluster IDs
+            case_id: Case identifier (default: "case_1")
+            
+        Returns:
+            PM4Py EventLog object
+        """
+        if not PM4PY_AVAILABLE:
+            raise ImportError("PM4Py is not installed. Run: pip install pm4py")
+        
+        # Get codebook for activity names
+        codebook = self.get_codebook()
+        
+        # Create a trace (sequence of events for one case)
+        trace = Trace()
+        trace.attributes["concept:name"] = case_id
+        
+        # Add events with timestamps
+        base_time = datetime.now()
+        for i, cluster_id in enumerate(cluster_ids):
+            event = Event()
+            event["concept:name"] = f"Cluster_{cluster_id}"
+            event["cluster_id"] = cluster_id
+            event["template"] = codebook.get(cluster_id, {}).get("template", "Unknown")
+            event["time:timestamp"] = base_time + timedelta(seconds=i)
+            trace.append(event)
+        
+        # Create event log and add the trace
+        event_log = EventLog()
+        event_log.append(trace)
+        
+        return event_log
+    
+    def discover_process_model(self, cluster_ids: list[int]):
+        """
+        Use PM4Py's heuristics miner to discover the process model.
+        
+        This creates a Petri net showing:
+        - Normal flow paths (high probability transitions)
+        - Anomalous paths (low probability transitions)
+        
+        Args:
+            cluster_ids: List of cluster IDs
+            
+        Returns:
+            Tuple of (net, initial_marking, final_marking)
+        """
+        if not PM4PY_AVAILABLE:
+            raise ImportError("PM4Py is not installed. Run: pip install pm4py")
+        
+        event_log = self.to_event_log(cluster_ids)
+        
+        # Apply heuristics miner
+        net, initial_marking, final_marking = heuristics_miner.apply(
+            event_log,
+            parameters={
+                "dependency_threshold": 0.5,  # Lower = more edges shown
+                "and_threshold": 0.65,
+                "loop_two_threshold": 0.5
+            }
+        )
+        
+        return net, initial_marking, final_marking
+    
+    def visualize_petri_net(self, cluster_ids: list[int], output_path: str = None):
+        """
+        Visualize the process as a Petri net using PM4Py.
+        
+        This shows the flow of log events as a graph:
+        - Circles = Places (states)
+        - Rectangles = Transitions (activities/cluster IDs)
+        - Arrows = Flow direction
+        
+        Args:
+            cluster_ids: List of cluster IDs
+            output_path: Optional path to save the visualization (PNG/SVG)
+        """
+        if not PM4PY_AVAILABLE:
+            raise ImportError("PM4Py is not installed. Run: pip install pm4py")
+        
+        print("\n🔍 Discovering process model with Heuristics Miner...")
+        net, im, fm = self.discover_process_model(cluster_ids)
+        
+        # Visualize
+        gviz = pn_visualizer.apply(
+            net, im, fm,
+            parameters={
+                "format": "png",
+                "debug": False
+            }
+        )
+        
+        if output_path:
+            pn_visualizer.save(gviz, output_path)
+            print(f"✅ Petri net saved to: {output_path}")
+        else:
+            # Display in viewer
+            pn_visualizer.view(gviz)
+            print("✅ Petri net visualization opened!")
+
 
 
 # ============================================================
@@ -241,3 +377,28 @@ if __name__ == "__main__":
     print()
     print("The 'DB ERROR' transition is rare (anomaly signal!)")
     print("An LLM can use this DNA + codebook to understand the pattern!")
+    
+    # PM4Py Visualization
+    if PM4PY_AVAILABLE:
+        print("\n" + "=" * 60)
+        print("🎨 PM4PY HEURISTICS MINER VISUALIZATION")
+        print("=" * 60)
+        try:
+            encoder.visualize_petri_net(
+                cluster_ids,
+                output_path="log_dna_petri_net.png"
+            )
+            print("\n📊 The Petri net shows:")
+            print("  - Rectangles = Log event types (cluster IDs)")
+            print("  - Circles = Process states")
+            print("  - Arrows = Flow direction")
+            print("  - Thick arrows = High probability transitions")
+            print("  - Thin arrows = Low probability (anomalies!)")
+        except Exception as e:
+            print(f"⚠️  Could not generate Petri net: {e}")
+    else:
+        print("\n" + "=" * 60)
+        print("⚠️  Install PM4Py to see Petri net visualization:")
+        print("    pip install pm4py")
+        print("=" * 60)
+
