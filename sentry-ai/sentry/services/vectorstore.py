@@ -366,13 +366,23 @@ class VectorStore:
         self.reverse_mapping = metadata['reverse_mapping']
         self.next_id = metadata['next_id']
         
-        # Verify dimension
+        # Verify dimension - CRITICAL CHECK
         loaded_dim = metadata.get('dimension', self.dimension)
         if loaded_dim != self.dimension:
-            logger.warning(
-                f"Loaded dimension ({loaded_dim}) doesn't match "
-                f"current dimension ({self.dimension})"
+            error_msg = (
+                f"❌ Dimension mismatch!\n"
+                f"   Loaded index: {loaded_dim} dimensions\n"
+                f"   Current model: {self.dimension} dimensions\n"
+                f"   This happens when you change the embedding model.\n"
+                f"\n"
+                f"   Solution: Delete the old index files:\n"
+                f"   - {self.index_path}\n"
+                f"   - {self.index_path}.meta\n"
+                f"\n"
+                f"   Then restart and re-index your content."
             )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         logger.info(f"✅ Loaded {self.index.ntotal} vectors")
     

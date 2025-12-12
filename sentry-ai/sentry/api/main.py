@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .routes import health, query, sources, indexing, chat, stats
+from .routes import health, query, sources, indexing, chat, stats, integrations
 from .auth import get_or_create_api_key
 from . import __version__
 
@@ -131,6 +131,7 @@ app.include_router(sources.router, prefix=API_PREFIX)
 app.include_router(indexing.router, prefix=API_PREFIX)
 app.include_router(chat.router, prefix=API_PREFIX)
 app.include_router(stats.router, prefix=API_PREFIX)
+app.include_router(integrations.router, prefix=API_PREFIX)
 
 
 # === Root Endpoint ===

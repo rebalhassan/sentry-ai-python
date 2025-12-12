@@ -194,7 +194,8 @@ class LLMClient:
         self,
         query: str,
         context_chunks: List[LogChunk],
-        system_prompt: Optional[str] = None
+        system_prompt: Optional[str] = None,
+        chat_context: Optional[str] = None  # Task 2: Optional chat history
     ) -> str:
         """
         Generate response using retrieved context (RAG)
@@ -209,6 +210,7 @@ class LLMClient:
             query: User's question
             context_chunks: Relevant log chunks from search
             system_prompt: Custom system prompt (uses default if None)
+            chat_context: Previous conversation for continuity
             
         Returns:
             LLM's answer
@@ -227,21 +229,35 @@ Guidelines:
 - Suggest next steps for investigation
 - Use timestamps to establish sequence of events
 """
+            # Add chat context instruction if we have history
+            if chat_context:
+                system_prompt += """
+- If the user refers to previous conversation, use that context to provide relevant answers
+"""
         
         # Build context from chunks
         context_text = self._format_context(context_chunks)
         
-        # Build the full prompt
-        prompt = f"""Based on the following log entries, answer this question:
+        # Build the full prompt with optional chat context
+        prompt_parts = []
+        
+        # Add chat context if available (Task 2)
+        if chat_context:
+            prompt_parts.append(f"CONVERSATION HISTORY:\n{chat_context}\n")
+        
+        prompt_parts.append(f"""Based on the following log entries, answer this question:
 
 QUESTION: {query}
 
 LOG ENTRIES:
 {context_text}
 
-Provide a clear, actionable answer based ONLY on the log entries above. If the logs don't contain enough information to answer, say so."""
+Provide a clear, actionable answer based ONLY on the log entries above. If the logs don't contain enough information to answer, say so.""")
+        
+        prompt = "\n".join(prompt_parts)
         
         return self.generate(prompt, system_prompt=system_prompt)
+
     
     def _format_context(self, chunks: List[LogChunk]) -> str:
         """
@@ -350,10 +366,11 @@ Provide ONLY the summary, no preamble."""
 
     def expand_query(self, query: str) -> str:
         """
-        Expand user query into technical terms for better semantic search
+        Expand user query using regex-based pattern matching
         
-        Uses a small, fast model (smollm2:135m) to translate vague queries
-        into specific error messages or technical terms.
+        This is faster and more deterministic than LLM-based expansion.
+        Uses pattern matching to identify common query types and expand them
+        with relevant technical terms found in logs.
         
         Args:
             query: User's original query
@@ -361,63 +378,240 @@ Provide ONLY the summary, no preamble."""
         Returns:
             Expanded query string with OR operators
         """
-        # Hardcoded model as requested
-        expansion_model = "smollm2:135m"
+        import re
         
-        prompt = f"""You are a query expansion system for a log analysis tool.
-Your job is to translate user queries into technical terms found in logs.
-
-Rules:
-1. Return ONLY the expanded query terms joined by OR
-2. Do not include the original query if it's vague
-3. Focus on error messages, status codes, and technical keywords
-4. Keep it simple and concise
-
-Examples:
-User: "why is it slow?"
-You: high latency OR slow response time OR timeout OR performance degradation
-
-User: "checkout errors"
-You: checkout service errors OR payment failures OR 500 errors in /checkout endpoint
-
-User: "database issues"
-You: connection refused OR deadlock OR query timeout OR slow query
-
-User: "{query}"
-You:"""
-
-        try:
-            logger.debug(f"Expanding query: '{query}' using {expansion_model}")
+        # Define comprehensive expansion rules
+        # Each pattern maps to a list of technical terms commonly found in logs
+        expansion_rules = {
+            # Performance & Latency Issues
+            r'\b(slow|latency|lag|sluggish|delayed?|hang|hanging|hung|freeze|freezing|frozen)\b': [
+                'high latency', 'slow response', 'slow response time', 'timeout', 
+                'performance degradation', 'response time exceeded', 'request timeout',
+                'slow query', 'delayed response', 'processing delay', 'lag detected',
+                'performance issue', 'slow performance', 'latency spike', 'high response time'
+            ],
             
-            # Create a temporary client for this specific request to ensure we use the right model
-            # and don't mess with the main client's state
-            client = ollama.Client(host=self.host)
+            # Timeout Issues
+            r'\b(timeout|timed?\s*out|time\s*limit)\b': [
+                'timeout', 'connection timeout', 'read timeout', 'write timeout',
+                'request timeout', 'operation timeout', 'execution timeout',
+                'timeout exceeded', 'timeout error', 'timed out', 'deadline exceeded'
+            ],
             
-            response = client.chat(
-                model=expansion_model,
-                messages=[
-                    {'role': 'user', 'content': prompt}
-                ],
-                options={
-                    'temperature': settings.query_expansion_temperature,
-                    'num_predict': 50,  # Short response
-                    'stop': ["\\n", "User:"]  # Stop at newline or next example
-                }
-            )
+            # General Errors & Failures
+            r'\b(error|fail(ure|ed|ing)?|crash(ed|ing)?|exception|bug|issue|problem|broken)\b': [
+                'error', 'exception', 'failure', 'failed', 'crash', 'crashed',
+                'fatal error', 'critical error', 'runtime error', 'system error',
+                'application error', 'service error', 'unhandled exception',
+                'stack trace', 'error code', 'error message', 'exception thrown'
+            ],
             
-            expanded = response['message']['content'].strip()
+            # Database Issues
+            r'\b(database|db|sql|mysql|postgres|postgresql|mongo|mongodb|redis|oracle)\b': [
+                'database error', 'database connection failed', 'connection refused',
+                'deadlock', 'deadlock detected', 'query timeout', 'slow query',
+                'connection pool exhausted', 'too many connections', 'max connections',
+                'database unavailable', 'connection lost', 'connection timeout',
+                'query failed', 'transaction failed', 'lock timeout', 'table lock',
+                'duplicate key', 'foreign key constraint', 'constraint violation'
+            ],
             
-            # Fallback if empty
-            if not expanded:
-                logger.warning("Query expansion returned empty string")
-                return query
-                
-            logger.info(f"Expanded: '{query}' -> '{expanded}'")
+            # Connection Issues
+            r'\b(connection|connect|socket|tcp|udp)\b': [
+                'connection refused', 'connection failed', 'connection timeout',
+                'connection reset', 'connection lost', 'connection closed',
+                'connection error', 'socket error', 'socket timeout', 'socket closed',
+                'unable to connect', 'connection aborted', 'connection dropped',
+                'broken pipe', 'connection pool', 'max connections reached'
+            ],
+            
+            # Network Issues
+            r'\b(network|dns|host|unreachable|ping)\b': [
+                'network error', 'network unreachable', 'host unreachable',
+                'DNS resolution failed', 'DNS lookup failed', 'DNS error',
+                'no route to host', 'network timeout', 'network connection failed',
+                'unable to resolve', 'hostname not found', 'connection refused',
+                'network is down', 'network unavailable', 'packet loss'
+            ],
+            
+            # Memory Issues
+            r'\b(memory|ram|heap|oom|out\s*of\s*memory|leak)\b': [
+                'out of memory', 'OOM', 'OutOfMemoryError', 'memory leak',
+                'heap exhausted', 'heap space', 'memory pressure', 'memory exceeded',
+                'insufficient memory', 'memory allocation failed', 'memory limit',
+                'heap overflow', 'stack overflow', 'memory error', 'GC overhead'
+            ],
+            
+            # Disk & Storage Issues
+            r'\b(disk|storage|filesystem|file\s*system|i/?o|partition|volume)\b': [
+                'disk full', 'no space left', 'disk space', 'storage full',
+                'I/O error', 'disk error', 'disk read error', 'disk write error',
+                'filesystem error', 'file system full', 'quota exceeded',
+                'disk failure', 'disk unavailable', 'read-only filesystem',
+                'permission denied', 'access denied', 'file not found'
+            ],
+            
+            # CPU Issues
+            r'\b(cpu|processor|core|thread|process)\b': [
+                'high CPU', 'CPU usage', 'CPU spike', 'CPU overload',
+                'CPU throttling', 'processor overload', 'thread pool exhausted',
+                'too many threads', 'process killed', 'process terminated',
+                'deadlock', 'thread deadlock', 'thread blocked', 'thread timeout'
+            ],
+            
+            # Authentication & Authorization
+            r'\b(auth(entication)?|login|logout|sign\s*in|sign\s*out|credential|token|session)\b': [
+                'authentication failed', 'authentication error', 'login failed',
+                'invalid credentials', 'unauthorized', 'access denied',
+                'permission denied', 'forbidden', 'token expired', 'token invalid',
+                'session expired', 'session timeout', 'invalid token',
+                'authentication required', 'credentials invalid', '401', '403'
+            ],
+            
+            # Permission & Access Issues
+            r'\b(permission|access|forbidden|denied|unauthorized)\b': [
+                'permission denied', 'access denied', 'forbidden', 'unauthorized',
+                'insufficient permissions', 'access forbidden', 'not authorized',
+                '403', '401', 'authentication required', 'authorization failed'
+            ],
+            
+            # HTTP Status Codes & API Errors
+            r'\b(4\d{2}|5\d{2}|http|api|rest|endpoint|request|response)\b': [
+                '400', '401', '403', '404', '405', '408', '429', '500', '502', '503', '504',
+                'bad request', 'unauthorized', 'forbidden', 'not found', 'method not allowed',
+                'request timeout', 'too many requests', 'internal server error',
+                'bad gateway', 'service unavailable', 'gateway timeout',
+                'API error', 'endpoint error', 'HTTP error', 'status code'
+            ],
+            
+            # Service Unavailability
+            r'\b(unavailable|down|offline|outage|maintenance)\b': [
+                'service unavailable', 'service down', 'service offline',
+                'system unavailable', 'system down', 'outage', 'downtime',
+                'maintenance mode', 'temporarily unavailable', '503',
+                'service not available', 'service unreachable'
+            ],
+            
+            # Deployment & Configuration
+            r'\b(deploy(ment)?|config(uration)?|setup|install|update|upgrade|migration)\b': [
+                'deployment failed', 'deployment error', 'configuration error',
+                'config error', 'misconfiguration', 'setup failed', 'installation failed',
+                'update failed', 'upgrade failed', 'migration failed', 'rollback',
+                'invalid configuration', 'configuration missing', 'setup error'
+            ],
+            
+            # Service-Specific: Checkout/Payment
+            r'\b(checkout|payment|cart|order|transaction|purchase)\b': [
+                'checkout failed', 'checkout error', 'payment failed', 'payment error',
+                'payment declined', 'transaction failed', 'transaction error',
+                'order failed', 'order error', 'cart error', 'purchase failed',
+                'payment gateway error', 'payment timeout', 'transaction timeout'
+            ],
+            
+            # Service-Specific: Email
+            r'\b(email|mail|smtp|send|notification)\b': [
+                'email failed', 'email error', 'SMTP error', 'send failed',
+                'mail delivery failed', 'notification failed', 'email timeout',
+                'SMTP connection failed', 'mail server error', 'delivery error'
+            ],
+            
+            # Service-Specific: Upload/Download
+            r'\b(upload|download|file\s*transfer|ftp|s3|blob|object\s*storage)\b': [
+                'upload failed', 'download failed', 'file transfer failed',
+                'upload error', 'download error', 'transfer error', 'FTP error',
+                'S3 error', 'storage error', 'blob error', 'file upload timeout',
+                'file download timeout', 'transfer timeout'
+            ],
+            
+            # Validation & Data Issues
+            r'\b(validat(ion|e)|invalid|corrupt(ed)?|malformed|parse|parsing)\b': [
+                'validation failed', 'validation error', 'invalid data',
+                'invalid input', 'invalid format', 'data corruption', 'corrupted data',
+                'malformed data', 'malformed request', 'parse error', 'parsing failed',
+                'invalid JSON', 'invalid XML', 'schema validation failed'
+            ],
+            
+            # Security Issues
+            r'\b(security|vulnerability|breach|attack|injection|xss|csrf|malicious)\b': [
+                'security error', 'security violation', 'vulnerability detected',
+                'security breach', 'attack detected', 'SQL injection', 'XSS attack',
+                'CSRF attack', 'malicious request', 'suspicious activity',
+                'unauthorized access', 'intrusion detected', 'security alert'
+            ],
+            
+            # Rate Limiting & Throttling
+            r'\b(rate\s*limit|throttl(e|ing)|quota|limit\s*exceed)\b': [
+                'rate limit exceeded', 'rate limited', 'throttled', 'throttling',
+                'quota exceeded', 'limit exceeded', 'too many requests', '429',
+                'request limit', 'API limit', 'usage limit exceeded'
+            ],
+            
+            # Retry & Backoff
+            r'\b(retry|retrying|backoff|attempt)\b': [
+                'retry failed', 'max retries exceeded', 'retry limit',
+                'retrying request', 'exponential backoff', 'retry attempt',
+                'all retries failed', 'retry exhausted'
+            ],
+            
+            # Cache Issues
+            r'\b(cache|caching|redis|memcache)\b': [
+                'cache error', 'cache miss', 'cache expired', 'cache unavailable',
+                'Redis error', 'Redis connection failed', 'cache timeout',
+                'cache invalidation', 'cache write failed', 'cache read failed'
+            ],
+            
+            # Queue & Message Issues
+            r'\b(queue|message|kafka|rabbitmq|sqs|pubsub|topic)\b': [
+                'queue error', 'message failed', 'queue full', 'message timeout',
+                'Kafka error', 'RabbitMQ error', 'SQS error', 'message delivery failed',
+                'queue overflow', 'message lost', 'consumer error', 'producer error',
+                'topic error', 'subscription error', 'message processing failed'
+            ],
+            
+            # Load Balancer & Proxy
+            r'\b(load\s*balanc(er|ing)|proxy|nginx|haproxy|gateway)\b': [
+                'load balancer error', 'proxy error', 'gateway error', 'upstream error',
+                'backend unavailable', 'no healthy upstream', 'proxy timeout',
+                'gateway timeout', '502', '504', 'upstream timeout',
+                'load balancing failed', 'proxy connection failed'
+            ],
+            
+            # Container & Orchestration
+            r'\b(docker|container|kubernetes|k8s|pod|node|cluster)\b': [
+                'container failed', 'container error', 'pod failed', 'pod error',
+                'node unavailable', 'node failure', 'cluster error', 'deployment failed',
+                'container crashed', 'pod crashed', 'OOMKilled', 'CrashLoopBackOff',
+                'ImagePullBackOff', 'container restart', 'pod restart'
+            ],
+            
+            # Logging & Monitoring
+            r'\b(log|logging|monitor|metric|alert|warning|critical)\b': [
+                'log error', 'logging failed', 'warning', 'critical', 'alert',
+                'monitoring error', 'metric error', 'log write failed',
+                'log rotation failed', 'alert triggered', 'threshold exceeded'
+            ],
+        }
+        
+        # Collect expansions based on pattern matches
+        expansions = set()
+        query_lower = query.lower()
+        
+        for pattern, terms in expansion_rules.items():
+            if re.search(pattern, query_lower, re.IGNORECASE):
+                expansions.update(terms)
+        
+        # If we found expansions, combine with original query
+        if expansions:
+            # Include original query + all matched expansion terms
+            all_terms = [query] + sorted(list(expansions))
+            expanded = ' OR '.join(all_terms)
+            logger.info(f"Expanded query: '{query}' -> {len(expansions)} terms added")
+            logger.debug(f"Expansion preview: {' OR '.join(list(expansions)[:5])}...")
             return expanded
-            
-        except Exception as e:
-            logger.warning(f"Query expansion failed: {e}")
-            return query  # Fallback to original query
+        
+        # No patterns matched, return original query
+        logger.debug(f"No expansion patterns matched for: '{query}'")
+        return query
 
     def chat(
         self,

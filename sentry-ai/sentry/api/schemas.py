@@ -199,3 +199,111 @@ class ErrorResponse(BaseModel):
     """Standard error response"""
     detail: str
     error_code: Optional[str] = None
+
+
+# ===== Integrations =====
+
+class IntegrationCredentials(BaseModel):
+    """
+    Credentials for external service integration.
+    
+    Required fields vary by service:
+    - **Vercel**: api_key (required), team_id (optional)
+    - **PostHog**: api_key, project_id (required), region (optional: us/eu)
+    - **DataDog**: api_key, app_key (required), site (optional: us1/us3/eu1/etc)
+    """
+    api_key: str = Field(..., description="API key or access token")
+    app_key: Optional[str] = Field(None, description="Application key (DataDog only)")
+    project_id: Optional[str] = Field(None, description="Project ID (PostHog only)")
+    team_id: Optional[str] = Field(None, description="Team ID (Vercel only)")
+    region: Optional[str] = Field(None, description="Region: us, eu (PostHog)")
+    site: Optional[str] = Field(None, description="Site: us1, us3, eu1, ap1 (DataDog)")
+    
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "api_key": "vercel_xxxxx",
+                    "team_id": "team_abc123"
+                },
+                {
+                    "api_key": "phx_xxxxx",
+                    "project_id": "12345",
+                    "region": "us"
+                },
+                {
+                    "api_key": "dd_api_xxxxx",
+                    "app_key": "dd_app_xxxxx",
+                    "site": "us1"
+                }
+            ]
+        }
+
+
+class IntegrationStatus(BaseModel):
+    """Status of an integration configuration."""
+    service: str = Field(..., description="Service name: vercel, posthog, datadog")
+    configured: bool = Field(..., description="Whether credentials are stored")
+    valid: Optional[bool] = Field(None, description="Whether credentials are valid (requires API check)")
+    last_checked: Optional[datetime] = Field(None, description="When validity was last checked")
+
+
+class IntegrationProject(BaseModel):
+    """A project from an external service."""
+    id: str
+    name: str
+    url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrationDeployment(BaseModel):
+    """A deployment from an external service."""
+    id: str = Field(..., description="Deployment ID or time period identifier")
+    name: str = Field(..., description="Deployment name or description")
+    url: Optional[str] = None
+    state: str = Field("", description="Deployment state (READY, BUILDING, etc.)")
+    created_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FetchLogsRequest(BaseModel):
+    """Request to fetch logs from an integration."""
+    deployment_id: Optional[str] = Field(
+        None, 
+        description="Deployment ID (Vercel) or time period (PostHog/DataDog: last_1h, last_24h, etc.)"
+    )
+    project_id: Optional[str] = Field(None, description="Project ID to filter logs")
+    start_time: Optional[datetime] = Field(None, description="Start of time range")
+    end_time: Optional[datetime] = Field(None, description="End of time range")
+    query: Optional[str] = Field(
+        None, 
+        description="Service-specific query (HogQL for PostHog, query syntax for DataDog)"
+    )
+    limit: int = Field(100, ge=1, le=1000, description="Maximum logs to fetch")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "deployment_id": "dpl_abc123",
+                "limit": 100
+            }
+        }
+
+
+class IntegrationLogEntry(BaseModel):
+    """A log entry from an external service."""
+    id: str
+    timestamp: datetime
+    message: str
+    level: str = Field("info", description="Log level: debug, info, warning, error, critical")
+    source: str = Field("", description="Source identifier (e.g., vercel/my-app/dpl_123)")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FetchLogsResponse(BaseModel):
+    """Response for fetching logs from an integration."""
+    service: str
+    logs: List[IntegrationLogEntry]
+    total: int
+    fetched_at: datetime

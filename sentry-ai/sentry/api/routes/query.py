@@ -35,8 +35,13 @@ async def rag_query(request: QueryRequest):
     try:
         rag = get_rag_service()
         
+        # Task 2: Fetch last 5 message pairs (10 messages) for chat context
+        recent_messages = db.get_chat_history(limit=10)
+        chat_context = _format_chat_context(recent_messages)
+        
         result = rag.query(
             query_text=request.query,
+            chat_context=chat_context,  # Pass chat context for continuity
             top_k=request.top_k,
             use_reranking=request.use_reranking,
             similarity_threshold=request.similarity_threshold
@@ -52,17 +57,19 @@ async def rag_query(request: QueryRequest):
         db.add_chat_message(user_msg)
         db.add_chat_message(assistant_msg)
         
+        # Task 4: COMMENTED OUT - Sources disabled per user request
         # Convert sources to response format
-        sources = [
-            SourceInfo(
-                id=chunk.id,
-                content=chunk.content,
-                timestamp=chunk.timestamp,
-                log_level=chunk.log_level.value,
-                metadata=chunk.metadata
-            )
-            for chunk in result.sources
-        ]
+        # sources = [
+        #     SourceInfo(
+        #         id=chunk.id,
+        #         content=chunk.content,
+        #         timestamp=chunk.timestamp,
+        #         log_level=chunk.log_level.value,
+        #         metadata=chunk.metadata
+        #     )
+        #     for chunk in result.sources
+        # ]
+        sources = []  # Return empty sources as per requirement
         
         return QueryResponse(
             answer=result.answer,
@@ -74,6 +81,33 @@ async def rag_query(request: QueryRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+def _format_chat_context(messages: list) -> str:
+    """
+    Format recent chat messages into a context string for the LLM.
+    
+    Takes last 5 message pairs (user-assistant) and formats them as conversation history.
+    """
+    if not messages:
+        return ""
+    
+    # Messages are returned in reverse chronological order, so reverse them
+    messages = list(reversed(messages))
+    
+    # Group into pairs and take last 5 pairs
+    context_lines = []
+    for msg in messages:
+        role = "User" if msg.role == "user" else "Assistant"
+        # Truncate long messages to avoid context overflow
+        content = msg.content[:500] + "..." if len(msg.content) > 500 else msg.content
+        context_lines.append(f"{role}: {content}")
+    
+    if not context_lines:
+        return ""
+    
+    return "Previous conversation:\n" + "\n".join(context_lines)
+
 
 
 @router.post("/stream")
