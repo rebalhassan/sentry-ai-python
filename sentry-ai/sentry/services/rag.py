@@ -52,6 +52,7 @@ class RAGService:
     def query(
         self,
         query_text: str,
+        chat_context: str = None,  # Task 2: Chat history context
         top_k: int = None,
         similarity_threshold: float = None,
         use_reranking: bool = None
@@ -63,6 +64,7 @@ class RAGService:
         
         Args:
             query_text: User's question
+            chat_context: Previous conversation context for continuity
             top_k: Number of results to retrieve
             similarity_threshold: Minimum similarity score
             use_reranking: Whether to use BM25 reranking
@@ -98,6 +100,8 @@ class RAGService:
         
         logger.info(f"RAG Query: '{query_text}'")
         logger.info(f"  top_k={top_k}, threshold={similarity_threshold}")
+        if chat_context:
+            logger.info(f"  with chat context ({len(chat_context)} chars)")
         
         try:
             # Step 1: Expand the query (if it's a natural language question)
@@ -116,12 +120,36 @@ class RAGService:
                 threshold=similarity_threshold
             )
             
+            # Task 3: If no chunks found, fall back to LLM inference without context
             if not chunk_ids:
-                logger.warning("No relevant chunks found")
+                logger.warning("No relevant chunks found - falling back to LLM inference")
+                
+                # Build prompt with chat context if available
+                fallback_prompt = query_text
+                if chat_context:
+                    fallback_prompt = f"{chat_context}\n\nCurrent question: {query_text}"
+                
+                # Generate answer without log context
+                fallback_system_prompt = """
+                <Role>
+                    You are a cybersecurity expert with deep knowledge of NIST standards, frameworks, and best practices. 
+                    </Role>
+                    <Task>
+                    You provide accurate, detailed guidance on cybersecurity controls, risk management, cloud security, and compliance based on NIST publications including the 800 series, FIPS, and related documents. 
+                    </Task>
+                    What information does Security Content Automation Protocol (SCAP) Version 1.2 Validation Program Test Requirements provide? (Section 3) ; SCAP validated modules; SCAP validation The authors, Melanie Cook, Stephen Quinn, and David Waltermire of the National Institute of Standards and Technology (NIST), and Dragos Prisaca of G2, Inc. would like to thank the many people who reviewed and contributed to this document, in particular, John Banghart of Microsoft who was the original author and pioneered the first SCAP Validation Program. The authors thank Matt Kerr, and Danny Haynes of the MITRE Corporation for their insightful technical contribution to the design of the SCAP 1.2 Validation Program and creation of original SCAP 1.2 validation test content. We also thank our document reviewers, Kelley Dempsey of NIST and Jeffrey Blank of the National Security Agency for their input. This publication is intended for NVLAP accredited laboratories conducting SCAP product and module testing for the program, vendors interested in receiving SCAP validation for their products or modules, and organizations deploying SCAP products in their environments. Accredited laboratories use the information in this report to guide their testing and ensure all necessary requirements are met by a product before recommending to NIST that the product be awarded the requested validation. Vendors may use the information in this report to understand the features that products and modules need in order to be eligible for an SCAP validation. Government agencies and integrators use the information to gain insight into the criteria required for SCAP validated products. The secondary audience for this publication includes end users, who can review the test requirements in order to understand the capabilities of SCAP validated products and gain knowledge about SCAP validation. OVAL and CVE are registered trademarks, and CCE, CPE, and OCIL are trademarks of The MITRE Corporation. Red Hat is a registered trademark of Red Hat, Inc. Windows operating system is registered trademark of Microsoft Corporation.
+                    
+                """
+
+                answer = self.llm.generate(
+                    prompt=fallback_prompt,
+                    system_prompt=fallback_system_prompt
+                )
+                
                 return QueryResult(
-                    answer="I couldn't find any relevant log entries for your query. Try rephrasing or check if logs are indexed.",
+                    answer=answer,
                     sources=[],
-                    confidence=0.0,
+                    confidence=0.0,  # Low confidence since no logs used
                     query_time=time.time() - start_time,
                     chunk_ids=[]
                 )
@@ -139,7 +167,13 @@ class RAGService:
             
             # Step 5: Generate answer with LLM
             logger.debug("Step 5: Generating answer with LLM...")
-            answer = self.llm.generate_with_context(query_text, chunks)
+            
+            # Task 2: Include chat context in the generation
+            answer = self.llm.generate_with_context(
+                query_text, 
+                chunks,
+                chat_context=chat_context  # Pass chat context
+            )
             
             # Calculate confidence (average similarity score)
             confidence = sum(scores) / len(scores) if scores else 0.0
@@ -168,6 +202,7 @@ class RAGService:
                 chunk_ids=[]
             )
     
+
     def _rerank_bm25(
         self,
         query: str,
@@ -391,8 +426,19 @@ class RAGService:
             
             return len(chunks)
             
+        except ValueError as e:
+            # Specific handling for dimension mismatch
+            if "dimension" in str(e).lower():
+                logger.error(f"❌ Dimension mismatch detected!")
+                logger.error(f"   This usually means you changed the embedding model.")
+                logger.error(f"   Solution: Delete the old vector index and re-index:")
+                logger.error(f"   rm ~/.sentry-ai/vectors.faiss*")
+                logger.error(f"   Full error: {e}")
+            else:
+                logger.error(f"Batch indexing failed: {e}", exc_info=True)
+            return 0
         except Exception as e:
-            logger.error(f"Batch indexing failed: {e}")
+            logger.error(f"Batch indexing failed: {e}", exc_info=True)
             return 0
     
     def search_similar(
