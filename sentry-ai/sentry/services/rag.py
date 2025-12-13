@@ -130,16 +130,7 @@ class RAGService:
                     fallback_prompt = f"{chat_context}\n\nCurrent question: {query_text}"
                 
                 # Generate answer without log context
-                fallback_system_prompt = """
-                <Role>
-                    You are a cybersecurity expert with deep knowledge of NIST standards, frameworks, and best practices. 
-                    </Role>
-                    <Task>
-                    You provide accurate, detailed guidance on cybersecurity controls, risk management, cloud security, and compliance based on NIST publications including the 800 series, FIPS, and related documents. 
-                    </Task>
-                    What information does Security Content Automation Protocol (SCAP) Version 1.2 Validation Program Test Requirements provide? (Section 3) ; SCAP validated modules; SCAP validation The authors, Melanie Cook, Stephen Quinn, and David Waltermire of the National Institute of Standards and Technology (NIST), and Dragos Prisaca of G2, Inc. would like to thank the many people who reviewed and contributed to this document, in particular, John Banghart of Microsoft who was the original author and pioneered the first SCAP Validation Program. The authors thank Matt Kerr, and Danny Haynes of the MITRE Corporation for their insightful technical contribution to the design of the SCAP 1.2 Validation Program and creation of original SCAP 1.2 validation test content. We also thank our document reviewers, Kelley Dempsey of NIST and Jeffrey Blank of the National Security Agency for their input. This publication is intended for NVLAP accredited laboratories conducting SCAP product and module testing for the program, vendors interested in receiving SCAP validation for their products or modules, and organizations deploying SCAP products in their environments. Accredited laboratories use the information in this report to guide their testing and ensure all necessary requirements are met by a product before recommending to NIST that the product be awarded the requested validation. Vendors may use the information in this report to understand the features that products and modules need in order to be eligible for an SCAP validation. Government agencies and integrators use the information to gain insight into the criteria required for SCAP validated products. The secondary audience for this publication includes end users, who can review the test requirements in order to understand the capabilities of SCAP validated products and gain knowledge about SCAP validation. OVAL and CVE are registered trademarks, and CCE, CPE, and OCIL are trademarks of The MITRE Corporation. Red Hat is a registered trademark of Red Hat, Inc. Windows operating system is registered trademark of Microsoft Corporation.
-                    
-                """
+                fallback_system_prompt = settings.main_prompt
 
                 answer = self.llm.generate(
                     prompt=fallback_prompt,
