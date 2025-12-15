@@ -21,6 +21,15 @@ import json
 from pathlib import Path
 import pandas as pd
 from datetime import datetime, timedelta
+import numpy as np
+
+# Sentence Transformers for trace embeddings
+try:
+    from sentence_transformers import SentenceTransformer
+    EMBEDDINGS_AVAILABLE = True
+except ImportError:
+    EMBEDDINGS_AVAILABLE = False
+    print("⚠️  sentence-transformers not installed. Install with: pip install sentence-transformers")
 
 # PM4Py imports
 try:
@@ -310,6 +319,154 @@ class LogDNAEncoder:
             pn_visualizer.view(gviz)
             print("✅ Petri net visualization opened!")
 
+    # ============================================================
+    # SENTENCE TRANSFORMER TRACE VECTORS
+    # ============================================================
+    
+    def init_embeddings(self, model_name: str = "all-MiniLM-L6-v2"):
+        """
+        Initialize the sentence transformer model for trace embeddings.
+        
+        Args:
+            model_name: HuggingFace model name (default: all-MiniLM-L6-v2, fast & good)
+        """
+        if not EMBEDDINGS_AVAILABLE:
+            raise ImportError("sentence-transformers not installed. Run: pip install sentence-transformers")
+        
+        self.embed_model = SentenceTransformer(model_name)
+        print(f"✅ Loaded embedding model: {model_name}")
+    
+    def _trace_to_text(self, cluster_ids: list[int], window_size: int = 5) -> str:
+        """
+        Convert a trace of cluster IDs to a text representation for embedding.
+        
+        Uses the codebook templates to create meaningful text.
+        
+        Args:
+            cluster_ids: Sequence of cluster IDs
+            window_size: Context window (5 before + 5 after = 11 total)
+            
+        Returns:
+            Text representation of the trace
+        """
+        codebook = self.get_codebook()
+        
+        # Convert cluster IDs to their template descriptions
+        parts = []
+        for cid in cluster_ids:
+            if cid in codebook:
+                template = codebook[cid]["template"]
+                parts.append(f"[{cid}:{template}]")
+            else:
+                parts.append(f"[{cid}:unknown]")
+        
+        return " -> ".join(parts)
+    
+    def get_trace_vector(self, cluster_ids: list[int]) -> np.ndarray:
+        """
+        Get a vector representation for a trace/sequence.
+        
+        This creates a fixed-size vector for any length sequence,
+        perfect for vector search.
+        
+        Args:
+            cluster_ids: Sequence of cluster IDs
+            
+        Returns:
+            Numpy array of shape (384,) for MiniLM model
+        """
+        if not hasattr(self, 'embed_model'):
+            self.init_embeddings()
+        
+        # Convert trace to text representation
+        trace_text = self._trace_to_text(cluster_ids)
+        
+        # Get embedding
+        return self.embed_model.encode(trace_text)
+    
+    def get_window_vectors(
+        self, 
+        cluster_ids: list[int], 
+        window_size: int = 5
+    ) -> list[dict]:
+        """
+        Create vectors for sliding windows of events.
+        
+        This is useful for finding similar "moments" in different traces.
+        Each window captures the context: 5 events around a center event.
+        
+        Args:
+            cluster_ids: Full sequence of cluster IDs
+            window_size: How many events each side (default: 5, so 11 total)
+            
+        Returns:
+            List of dicts with:
+            - "center_idx": Position in original sequence
+            - "center_cluster": The center event cluster ID
+            - "window": The cluster IDs in this window
+            - "vector": The embedding for this window
+        """
+        if not hasattr(self, 'embed_model'):
+            self.init_embeddings()
+        
+        results = []
+        
+        for i, center_cluster in enumerate(cluster_ids):
+            # Extract window around center
+            start = max(0, i - window_size)
+            end = min(len(cluster_ids), i + window_size + 1)
+            window = cluster_ids[start:end]
+            
+            # Get vector for this window
+            vector = self.get_trace_vector(window)
+            
+            results.append({
+                "center_idx": i,
+                "center_cluster": center_cluster,
+                "window": window,
+                "vector": vector
+            })
+        
+        return results
+    
+    def find_similar_traces(
+        self, 
+        query_trace: list[int], 
+        all_traces: list[list[int]], 
+        topn: int = 5
+    ) -> list[tuple[int, float, list[int]]]:
+        """
+        Find traces most similar to a query trace.
+        
+        Great for: "Show me other error chains similar to this one"
+        
+        Args:
+            query_trace: The trace to find similar ones for
+            all_traces: List of all traces to search through
+            topn: How many similar traces to return
+            
+        Returns:
+            List of (trace_idx, similarity_score, trace) tuples
+        """
+        if not hasattr(self, 'embed_model'):
+            self.init_embeddings()
+        
+        # Get query vector
+        query_vec = self.get_trace_vector(query_trace)
+        
+        # Calculate similarity to all traces
+        similarities = []
+        for idx, trace in enumerate(all_traces):
+            trace_vec = self.get_trace_vector(trace)
+            # Cosine similarity
+            sim = np.dot(query_vec, trace_vec) / (
+                np.linalg.norm(query_vec) * np.linalg.norm(trace_vec) + 1e-8
+            )
+            similarities.append((idx, sim, trace))
+        
+        # Sort by similarity
+        similarities.sort(key=lambda x: -x[1])
+        return similarities[:topn]
 
 
 # ============================================================
@@ -401,4 +558,68 @@ if __name__ == "__main__":
         print("⚠️  Install PM4Py to see Petri net visualization:")
         print("    pip install pm4py")
         print("=" * 60)
-
+    
+    # Sentence Transformer Trace Vectors
+    if EMBEDDINGS_AVAILABLE:
+        print("\n" + "=" * 60)
+        print("🧠 SENTENCE TRANSFORMER TRACE VECTORS")
+        print("=" * 60)
+        
+        # Create traces for comparison
+        traces = [
+            # Normal traces
+            [1, 2, 3, 2],  # login -> dashboard -> success -> dashboard
+            [1, 2, 3, 2],  # same pattern
+            [1, 2, 3, 2],  # same pattern
+            # Error trace
+            [1, 2, 4, 5],  # login -> dashboard -> DB error -> terminated
+            # Original full trace
+            cluster_ids,
+        ]
+        
+        try:
+            # Initialize embeddings (auto-loads on first use)
+            print("\n� Loading embedding model...")
+            encoder.init_embeddings()
+            
+            # Get trace vectors
+            print("\n📐 Trace vectors (for vector search):")
+            normal_trace = [1, 2, 3, 2]
+            error_trace = [1, 2, 4, 5]
+            
+            normal_vec = encoder.get_trace_vector(normal_trace)
+            error_vec = encoder.get_trace_vector(error_trace)
+            
+            print(f"  Normal trace {normal_trace}: vector shape {normal_vec.shape}")
+            print(f"  Error trace {error_trace}: vector shape {error_vec.shape}")
+            
+            # Show the text representation
+            print("\n📝 Trace text representations:")
+            print(f"  Normal: {encoder._trace_to_text(normal_trace)[:80]}...")
+            print(f"  Error:  {encoder._trace_to_text(error_trace)[:80]}...")
+            
+            # Calculate similarity between traces
+            from numpy.linalg import norm
+            similarity = np.dot(normal_vec, error_vec) / (norm(normal_vec) * norm(error_vec) + 1e-8)
+            print(f"\n  Similarity between normal and error trace: {similarity:.3f}")
+            print("  (Lower = more different, which is good for anomaly detection!)")
+            
+            # Find similar traces
+            print("\n🔍 Finding traces similar to the error trace:")
+            similar_traces = encoder.find_similar_traces(error_trace, traces, topn=3)
+            for idx, score, trace in similar_traces:
+                print(f"  Trace {idx}: {trace} (similarity: {score:.3f})")
+            
+        except Exception as e:
+            import traceback
+            print(f"⚠️  Trace vector error: {e}")
+            traceback.print_exc()
+    else:
+        print("\n" + "=" * 60)
+        print("⚠️  Install sentence-transformers to use trace vectors:")
+        print("    pip install sentence-transformers")
+        print("=" * 60)
+    
+    print("\n" + "=" * 60)
+    print("✅ DEMO COMPLETE!")
+    print("=" * 60)
