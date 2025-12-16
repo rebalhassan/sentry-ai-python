@@ -101,6 +101,13 @@ class AnomalyInfo:
     # The template text (for human readability)
     template: str = ""
     
+    # NEW: Severity penalty applied (0.0 = no penalty, 1.0 = max penalty)
+    severity_weight: float = 0.0
+    
+    # NEW: The effective probability after penalty
+    # effective_prob = transition_prob * (1 - severity_weight)
+    effective_prob: float = 0.0
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage/serialization."""
         return {
@@ -109,6 +116,8 @@ class AnomalyInfo:
             "anomaly_score": self.anomaly_score,
             "anomaly_type": self.anomaly_type,
             "transition_prob": self.transition_prob,
+            "effective_prob": self.effective_prob,
+            "severity_weight": self.severity_weight,
             "from_cluster": self.from_cluster,
             "to_cluster": self.to_cluster,
             "template": self.template
@@ -305,24 +314,29 @@ class AnomalyDetector:
     
     def detect(self, cluster_ids: List[int]) -> List[AnomalyInfo]:
         """
-        Detect anomalies in a sequence.
+        Detect anomalies in a sequence using SEVERITY-PENALIZED probabilities.
         
-        Goes through each transition and flags the rare ones.
+        ## The Severity Penalty System
+        
+        Even if an error happens frequently (high probability), we still want
+        to flag it if it's severe. We apply a penalty based on template severity.
+        
+        Formula:
+            effective_prob = transition_prob × (1 - severity_weight)
+        
+        Example:
+            transition_prob = 0.50 (happens 50% of time - normally OK)
+            severity_weight = 0.80 (FATAL keyword found)
+            effective_prob = 0.50 × (1 - 0.80) = 0.50 × 0.20 = 0.10
+            0.10 < threshold (0.15) → FLAGGED AS ANOMALY!
+        
+        This ensures severe errors are always flagged, even if common.
         
         Args:
             cluster_ids: Sequence to analyze
             
         Returns:
             List of AnomalyInfo for each detected anomaly
-        
-        ## How It Works
-        
-        For each position i in the sequence:
-        1. Get the transition: cluster_ids[i-1] → cluster_ids[i]
-        2. Look up its probability
-        3. If probability < threshold: FLAG as anomaly
-        4. Score = 1 - probability (higher = more anomalous)
-        5. Type = derived from template
         """
         if not self._fitted:
             raise ValueError("Must call fit() before detect()")
@@ -333,20 +347,35 @@ class AnomalyDetector:
             from_c = cluster_ids[i - 1]
             to_c = cluster_ids[i]
             
+            # Get raw transition probability
             prob = self.get_transition_probability(from_c, to_c)
             
-            # Check if this transition is rare (anomalous)
-            if prob < self.anomaly_threshold:
-                # Get template for classification
-                template = self.codebook.get(to_c, "")
+            # Get template for classification and severity
+            template = self.codebook.get(to_c, "")
+            
+            # Get severity penalty from template keywords
+            severity_weight = self._get_severity_penalty(template)
+            
+            # Apply penalty: effective_prob = prob × (1 - severity_weight)
+            # Higher severity = lower effective probability = more likely to be flagged
+            effective_prob = prob * (1.0 - severity_weight)
+            
+            # Check if this transition is anomalous (using EFFECTIVE probability)
+            if effective_prob < self.anomaly_threshold:
                 anomaly_type = self._classify_from_template(template)
+                
+                # Anomaly score combines rarity AND severity
+                # Score = 1 - effective_prob (higher = more anomalous)
+                anomaly_score = 1.0 - effective_prob
                 
                 anomaly = AnomalyInfo(
                     index=i,
                     cluster_id=to_c,
-                    anomaly_score=1.0 - prob,  # Higher score = more anomalous
+                    anomaly_score=anomaly_score,
                     anomaly_type=anomaly_type,
                     transition_prob=prob,
+                    effective_prob=effective_prob,
+                    severity_weight=severity_weight,
                     from_cluster=from_c,
                     to_cluster=to_c,
                     template=template
@@ -354,6 +383,76 @@ class AnomalyDetector:
                 anomalies.append(anomaly)
         
         return anomalies
+    
+    def _get_severity_penalty(self, template: str) -> float:
+        """
+        Calculate severity penalty from template keywords.
+        
+        The more FATAL/CRITICAL the event, the higher the penalty.
+        This ensures severe errors are always flagged, even if common.
+        
+        Args:
+            template: The cluster template text
+            
+        Returns:
+            Penalty weight (0.0 to 0.95)
+            - 0.0 = no penalty (INFO logs)
+            - 0.3 = low penalty (warnings)
+            - 0.5 = medium penalty (errors)
+            - 0.7 = high penalty (critical)
+            - 0.9 = max penalty (fatal/crash)
+        
+        ## How It Works
+        
+        We scan the template for severity keywords and return the highest
+        penalty that matches.
+        
+        Example:
+            "FATAL Database connection lost" → 0.9 (max penalty)
+            "ERROR Query timeout"            → 0.5 (medium penalty)
+            "WARN Slow response"             → 0.3 (low penalty)
+            "INFO User logged in"            → 0.0 (no penalty)
+        """
+        if not template:
+            return 0.0
+        
+        t = template.lower()
+        
+        # Severity levels (ordered from highest to lowest)
+        # Check highest severity first and return immediately
+        
+        # FATAL (0.9) - System is unusable, immediate failure
+        fatal_keywords = ['fatal', 'panic', 'segfault', 'segmentation fault', 
+                          'core dump', 'kernel panic', 'system halt', 'oom killer']
+        if any(kw in t for kw in fatal_keywords):
+            return 0.9
+        
+        # CRITICAL (0.8) - Crash, data loss, security breach
+        critical_keywords = ['critical', 'crash', 'crashed', 'killed', 'terminated',
+                            'data loss', 'corruption', 'security breach', 'unauthorized']
+        if any(kw in t for kw in critical_keywords):
+            return 0.8
+        
+        # SEVERE (0.7) - Service down, major failure
+        severe_keywords = ['severe', 'service unavailable', '503', '502', 
+                          'connection refused', 'connection lost', 'unreachable']
+        if any(kw in t for kw in severe_keywords):
+            return 0.7
+        
+        # ERROR (0.5) - Something failed but system continues
+        error_keywords = ['error', 'exception', 'failed', 'failure', '500', 
+                         'timeout', 'timed out', 'refused', 'rejected']
+        if any(kw in t for kw in error_keywords):
+            return 0.5
+        
+        # WARNING (0.3) - Potential problem, degraded performance
+        warning_keywords = ['warn', 'warning', 'slow', 'retry', 'retrying',
+                           'degraded', 'high load', 'backpressure']
+        if any(kw in t for kw in warning_keywords):
+            return 0.3
+        
+        # DEBUG/INFO (0.0) - No penalty
+        return 0.0
     
     def _classify_from_template(self, template: str) -> str:
         """
@@ -537,10 +636,11 @@ class AnomalyDetector:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("🔍 ANOMALY DETECTOR DEMO")
+    print("🔍 ANOMALY DETECTOR DEMO - With Severity Penalty")
     print("=" * 70)
     
-    # Sample data
+    # Sample data - includes both rare AND common errors
+    # The key demo: cluster 7 (CRITICAL crash) happens often but should still be flagged
     logs = [
         "2024-01-15 10:00:01 INFO User john connected from 192.168.1.1",
         "2024-01-15 10:00:02 INFO User john requested dashboard",
@@ -548,54 +648,96 @@ if __name__ == "__main__":
         "2024-01-15 10:00:04 INFO User john logged out",
         "2024-01-15 10:01:01 INFO User alice connected from 10.0.0.1",
         "2024-01-15 10:01:02 INFO User alice requested dashboard",
-        "2024-01-15 10:01:03 ERROR Database connection timeout after 30s",  # Anomaly!
-        "2024-01-15 10:01:04 ERROR Session terminated unexpectedly",        # Anomaly!
+        "2024-01-15 10:01:03 ERROR Database connection timeout after 30s",  # Anomaly (rare)
+        "2024-01-15 10:01:04 CRITICAL System crashed due to memory corruption",  # Anomaly (severe!)
         "2024-01-15 10:02:01 INFO User bob connected from 172.16.0.1",
         "2024-01-15 10:02:02 INFO User bob requested dashboard",
-        "2024-01-15 10:02:03 INFO Query completed successfully",
-        "2024-01-15 10:02:04 INFO User bob logged out",
+        "2024-01-15 10:02:03 CRITICAL System crashed due to memory corruption",  # COMMON but severe!
+        "2024-01-15 10:02:04 INFO Recovery completed",
     ]
     
-    # Simulated cluster IDs (in real use, these come from Drain3)
-    cluster_ids = [1, 2, 3, 4, 1, 2, 5, 6, 1, 2, 3, 4]
+    # Simulated cluster IDs
+    # Note: cluster 7 (CRITICAL crash) appears TWICE - making it "common" (33% from cluster 2)
+    # Without severity penalty, it wouldn't be flagged
+    # With severity penalty (0.8 for CRITICAL), it WILL be flagged
+    cluster_ids = [1, 2, 3, 4, 1, 2, 5, 7, 1, 2, 7, 8]
     
     # Simulated codebook
     codebook = {
         1: {"template": "INFO User <*> connected from <*>", "count": 3},
         2: {"template": "INFO User <*> requested dashboard", "count": 3},
-        3: {"template": "INFO Query completed successfully", "count": 2},
-        4: {"template": "INFO User <*> logged out", "count": 2},
+        3: {"template": "INFO Query completed successfully", "count": 1},
+        4: {"template": "INFO User <*> logged out", "count": 1},
         5: {"template": "ERROR Database connection timeout after <*>", "count": 1},
-        6: {"template": "ERROR Session terminated unexpectedly", "count": 1},
+        7: {"template": "CRITICAL System crashed due to memory corruption", "count": 2},
+        8: {"template": "INFO Recovery completed", "count": 1},
     }
     
     print("\n📋 Sample logs:")
     for i, log in enumerate(logs):
-        print(f"  [{i}] Cluster {cluster_ids[i]}: {log[:60]}...")
+        print(f"  [{i}] Cluster {cluster_ids[i]}: {log[:55]}...")
     
-    # Create detector
-    print("\n🔧 Creating and fitting detector...")
-    detector = AnomalyDetector(anomaly_threshold=0.35)
+    # Create detector with threshold that would normally miss high-prob errors
+    print("\n🔧 Creating detector with threshold=0.25 (25%)")
+    print("   Without severity penalty, cluster 7 (33% prob) would NOT be flagged!")
+    detector = AnomalyDetector(anomaly_threshold=0.25)
     detector.fit(cluster_ids, codebook)
     
     print(f"\n{detector.get_summary()}")
     
+    # Show severity weights
+    print("\n" + "=" * 70)
+    print("⚖️  SEVERITY WEIGHTS (from template keywords)")
+    print("=" * 70)
+    
+    for cid, info in codebook.items():
+        template = info["template"]
+        weight = detector._get_severity_penalty(template)
+        level = "FATAL" if weight >= 0.9 else "CRITICAL" if weight >= 0.8 else \
+                "SEVERE" if weight >= 0.7 else "ERROR" if weight >= 0.5 else \
+                "WARNING" if weight >= 0.3 else "INFO"
+        print(f"  Cluster {cid}: {level:8} (weight={weight:.1f}) - {template[:40]}...")
+    
     # Detect anomalies
     print("\n" + "=" * 70)
-    print("🚨 DETECTED ANOMALIES")
+    print("🚨 DETECTED ANOMALIES (with Severity Penalty)")
     print("=" * 70)
     
     anomalies = detector.detect(cluster_ids)
-    for a in anomalies:
-        print(f"\n  Index {a.index}: Cluster {a.cluster_id}")
-        print(f"    Transition: [{a.from_cluster}] → [{a.to_cluster}]")
-        print(f"    Probability: {a.transition_prob:.1%} (threshold: 15%)")
-        print(f"    Anomaly Score: {a.anomaly_score:.2f}")
-        print(f"    Type: {a.anomaly_type}")
-        print(f"    Template: {a.template}")
+    
+    if not anomalies:
+        print("\n  No anomalies detected!")
+    else:
+        for a in anomalies:
+            print(f"\n  Index {a.index}: Cluster {a.cluster_id}")
+            print(f"    Transition: [{a.from_cluster}] → [{a.to_cluster}]")
+            print(f"    Raw Probability: {a.transition_prob:.1%}")
+            print(f"    Severity Weight: {a.severity_weight:.1f} (penalty)")
+            print(f"    Effective Prob:  {a.effective_prob:.1%} = {a.transition_prob:.1%} × (1 - {a.severity_weight:.1f})")
+            print(f"    Anomaly Score:   {a.anomaly_score:.2f}")
+            print(f"    Type: {a.anomaly_type}")
+    
+    # Explain the magic
+    print("\n" + "=" * 70)
+    print("💡 HOW SEVERITY PENALTY WORKS")
+    print("=" * 70)
+    print("""
+    Without penalty:
+      Cluster 7 (CRITICAL crash) has 33% probability
+      33% > 25% threshold → NOT flagged as anomaly ❌
+    
+    With penalty:
+      Raw probability = 33%
+      Severity weight = 0.8 (CRITICAL keyword)
+      Effective prob  = 33% × (1 - 0.8) = 33% × 0.2 = 6.6%
+      6.6% < 25% threshold → FLAGGED as anomaly ✅
+    
+    This ensures FATAL/CRITICAL events are ALWAYS flagged,
+    even if they happen frequently!
+    """)
     
     # Create annotated chunks
-    print("\n" + "=" * 70)
+    print("=" * 70)
     print("📦 ANNOTATED CHUNKS (Context Stuffed)")
     print("=" * 70)
     
@@ -608,11 +750,13 @@ if __name__ == "__main__":
             print(f"\n  Chunk {i}:")
             print(f"    Type: {chunk.anomaly_type}")
             print(f"    Score: {chunk.anomaly_score:.2f}")
+            print(f"    Severity: {chunk.anomaly.severity_weight:.1f}")
             print(f"    Context ({len(chunk.log_lines)} lines):")
             for j, line in enumerate(chunk.log_lines):
                 marker = "→ " if j == chunk.center_index else "  "
-                print(f"      {marker}{line[:60]}...")
+                print(f"      {marker}{line[:55]}...")
     
     print("\n" + "=" * 70)
     print("✅ DEMO COMPLETE!")
     print("=" * 70)
+
