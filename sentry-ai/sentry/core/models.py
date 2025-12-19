@@ -56,16 +56,34 @@ class LogSource(BaseModel):
 
 class LogChunk(BaseModel):
     """
-    A single chunk of log data that gets embedded and stored
-    This is the atomic unit of our RAG system
+    A single chunk of log data that gets embedded and stored.
+    This is the atomic unit of our RAG system.
+    
+    Helix Vector Annotations:
+        cluster_id: DNA cluster from Drain3 pattern mining
+        cluster_template: The pattern template for this cluster
+        is_anomaly: Whether this chunk was flagged as anomalous
+        anomaly_type: Classification (e.g., "database_timeout")
+        anomaly_score: How anomalous (0.0 = normal, 1.0 = very rare)
+        severity_weight: Severity penalty from template keywords
+        transition_prob: Markov chain transition probability
     """
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     source_id: str  # References LogSource.id
     content: str  # The actual log text
     timestamp: datetime
     log_level: LogLevel = LogLevel.UNKNOWN
-    metadata: Dict[str, Any] = Field(default_factory=dict)  # Extra info (file path, event ID, etc.)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     embedding_id: Optional[int] = None  # Index in FAISS vector store
+    
+    # Helix Vector annotations
+    cluster_id: Optional[int] = None
+    cluster_template: Optional[str] = None
+    is_anomaly: bool = False
+    anomaly_type: Optional[str] = None
+    anomaly_score: float = 0.0
+    severity_weight: float = 0.0
+    transition_prob: Optional[float] = None
     
     class Config:
         json_schema_extra = {
@@ -74,7 +92,11 @@ class LogChunk(BaseModel):
                 "content": "ERROR: Disk write failure on D:\\data",
                 "timestamp": "2025-11-02T21:30:45",
                 "log_level": "error",
-                "metadata": {"file": "system.log", "line": 4521}
+                "metadata": {"file": "system.log", "line": 4521},
+                "cluster_id": 5,
+                "is_anomaly": True,
+                "anomaly_type": "io_error",
+                "anomaly_score": 0.85
             }
         }
 

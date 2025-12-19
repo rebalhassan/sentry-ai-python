@@ -13,6 +13,7 @@ Strategy (per docs.md lines 761-766):
 
 import re
 import csv
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -20,6 +21,9 @@ from dateutil import parser as date_parser
 
 from ..core.models import LogChunk, LogLevel
 from ..core.config import settings
+from .helix import get_helix_service, HelixService
+
+logger = logging.getLogger(__name__)
 
 
 class LogIndexer:
@@ -54,14 +58,17 @@ class LogIndexer:
     
     def parse_file(self, file_path: Path, source_id: str) -> List[LogChunk]:
         """
-        Parse a single log file into LogChunk objects
+        Parse a single log file into LogChunk objects.
+        
+        Chunks are automatically annotated with Helix Vector metadata
+        (cluster IDs, anomaly scores, severity weights).
         
         Args:
             file_path: Path to the log file (.log, .txt, .csv)
             source_id: ID of the LogSource this file belongs to
             
         Returns:
-            List of LogChunk objects
+            List of LogChunk objects with Helix annotations
             
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -81,11 +88,14 @@ class LogIndexer:
         extension = file_path.suffix.lower()
         
         if extension == '.csv':
-            return self._parse_csv_file(file_path, source_id)
+            chunks = self._parse_csv_file(file_path, source_id)
         elif extension in ['.log', '.txt', '.out', '.err']:
-            return self._parse_text_file(file_path, source_id)
+            chunks = self._parse_text_file(file_path, source_id)
         else:
             raise ValueError(f"Unsupported file extension: {extension}")
+        
+        # Annotate with Helix Vector
+        return self._annotate_with_helix(chunks)
     
     def parse_folder(self, folder_path: Path, source_id: str) -> List[LogChunk]:
         """
@@ -108,14 +118,15 @@ class LogIndexer:
             for file_path in folder_path.rglob(f"*{ext}"):
                 # Skip files that are too large
                 if settings.is_file_too_large(file_path):
-                    print(f"⚠️  Skipping large file: {file_path}")
+                    logger.warning("Skipping large file: %s", file_path)
                     continue
                 
                 try:
+                    # parse_file already applies Helix annotation
                     chunks = self.parse_file(file_path, source_id)
                     all_chunks.extend(chunks)
                 except Exception as e:
-                    print(f"⚠️  Error parsing {file_path}: {e}")
+                    logger.warning("Error parsing %s: %s", file_path, e)
                     continue
         
         return all_chunks
@@ -184,6 +195,9 @@ class LogIndexer:
                 
         except Exception as e:
             raise ValueError(f"Error reading file {file_path} incrementally: {e}")
+        
+        # Annotate with Helix Vector
+        chunks = self._annotate_with_helix(chunks)
         
         return chunks, new_position
     
@@ -535,3 +549,39 @@ class LogIndexer:
         except:
             # If parsing fails, return None
             return None
+    
+    def _annotate_with_helix(self, chunks: List[LogChunk]) -> List[LogChunk]:
+        """
+        Annotate chunks with Helix Vector metadata.
+        
+        Uses HelixService to add:
+        - cluster_id: DNA cluster from Drain3 pattern mining
+        - cluster_template: The pattern template for this cluster
+        - is_anomaly: Whether this chunk was flagged as anomalous
+        - anomaly_type: Classification (e.g., "database_timeout")
+        - anomaly_score: How anomalous (0.0 = normal, 1.0 = very rare)
+        - severity_weight: Severity penalty from template keywords
+        - transition_prob: Markov chain transition probability
+        
+        Args:
+            chunks: List of LogChunk objects to annotate
+            
+        Returns:
+            Same list of chunks with Helix fields populated
+        """
+        if not chunks:
+            return chunks
+        
+        # Check if Helix is enabled in config
+        if not settings.helix_enabled:
+            logger.debug("Helix annotation disabled in config")
+            return chunks
+        
+        try:
+            helix = get_helix_service()
+            return helix.annotate_chunks(chunks)
+        except Exception as e:
+            logger.error("Helix annotation failed: %s", e)
+            # Return chunks without Helix annotation on error
+            return chunks
+

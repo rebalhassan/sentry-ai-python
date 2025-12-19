@@ -64,12 +64,20 @@ class Settings(BaseSettings):
     llm_timeout: int = 60  # Seconds before timeout
     
     # Context generation (for embeddings) - uses a smaller/faster model
-    context_model: str = "tinyllama:latest"  # Small model for fast context summaries
+    context_model: str = "gemma3:latest"  # Small model for fast context summaries
     context_temperature: float = 0.3  # Lower for consistent summaries
     context_max_tokens: int = 150  # Keep summaries concise
     
     # Query Expansion
     query_expansion_temperature: float = 0.2  # Low for deterministic expansions
+    
+    # ===== OPENROUTER CLOUD LLM =====
+    # OpenRouter provides unified access to cloud LLMs via OpenAI-compatible API
+    # Get your API key from: https://openrouter.ai/keys
+    openrouter_api_key: Optional[str] = Field(default=None)  # From env: SENTRY_OPENROUTER_API_KEY
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "qwen/qwen3-coder:free"  # Default free model
+    use_cloud_llm: bool = True  # Toggle: False = Ollama (local), True = OpenRouter (cloud)
     
     # ===== INDEXING =====
     max_file_size_mb: int = 100  # Skip files larger than this
@@ -93,6 +101,20 @@ class Settings(BaseSettings):
     cache_embeddings: bool = True  # Cache embeddings to avoid recomputation
     cache_llm_responses: bool = False  # Cache LLM responses (for testing)
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    
+    # ===== HELIX VECTOR (DNA Encoding + Anomaly Detection) =====
+    helix_enabled: bool = True  # Enable Helix Vector annotation
+    helix_anomaly_threshold: float = 0.20  # Transitions below this probability are anomalies
+    helix_drain_sim_th: float = 0.4  # Drain3 similarity threshold (lower = more clusters)
+    helix_drain_depth: int = 4  # Drain3 parse tree depth
+    
+    # Severity penalty weights (higher = more likely to flag as anomaly)
+    helix_severity_fatal: float = 0.9    # FATAL, panic, segfault
+    helix_severity_critical: float = 0.8  # CRITICAL, crash, corruption
+    helix_severity_severe: float = 0.7    # Service unavailable, 503, 502
+    helix_severity_error: float = 0.5     # ERROR, exception, failed, timeout
+    helix_severity_warning: float = 0.3   # WARNING, slow, retry
+    helix_context_window: int = 4  # Context window size (2 before + 2 after)
     
     # ===== UI SETTINGS =====
     chat_history_limit: int = 50  # Keep last N messages
