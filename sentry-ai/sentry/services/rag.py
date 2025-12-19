@@ -365,55 +365,38 @@ class RAGService:
             # Step 1: Add to database (store original content)
             db.add_chunks_batch(chunks)
 
-            # Step 2: CONTEXTUAL EMBEDDING - Group chunks by source
-            chunks_by_source = {}
-            for chunk in chunks:
-                if chunk.source_id not in chunks_by_source:
-                    chunks_by_source[chunk.source_id] = []
-                chunks_by_source[chunk.source_id].append(chunk)
-
-            # Build source_names mapping (source_id -> display name)
-            source_names = {}
-            for source_id in chunks_by_source.keys():
-                source = db.get_source(source_id)
-                if source:
-                    source_names[source_id] = source.name
-                else:
-                    source_names[source_id] = "Unknown Source"
-
-            # Prepare contextualized contents for embedding
+            # Step 2: Helix Vector annotation
+            # Annotate chunks with cluster_id, anomaly_type, severity_weight
+            # This is needed when chunks bypass the LogIndexer (e.g., from Streamlit)
+            if settings.helix_enabled:
+                try:
+                    from .helix import get_helix_service
+                    helix = get_helix_service()
+                    chunks = helix.annotate_chunks(chunks)
+                    logger.info(f"Helix: {helix.get_stats()['cluster_count']} clusters, "
+                               f"{sum(1 for c in chunks if c.is_anomaly)} anomalies")
+                except Exception as e:
+                    logger.warning(f"Helix annotation failed: {e}")
+            
+            # Step 3: Prepare contents for embedding
             contents_to_embed = []
-            chunks_ordered = []
+            for chunk in chunks:
+                # Use raw content for embedding
+                # Helix annotations are stored in chunk fields, not embedded
+                contents_to_embed.append(chunk.content)
 
-            for source_id, source_chunks in chunks_by_source.items():
-                source_name = source_names.get(source_id, "Unknown Source")
-                
-                # Generate context summary using LLM
-                logger.info(f"🧠 Generating context for '{source_name}' ({len(source_chunks)} chunks)...")
-                context_summary = self.llm.generate_context_summary(source_chunks, source_name)
-                
-                # Apply context to each chunk
-                for chunk in source_chunks:
-                    # Store context in metadata
-                    chunk.metadata['context_summary'] = context_summary
-                    
-                    # Create contextualized content for embedding
-                    contextualized_content = f"Context: {context_summary}\n\nLog Entry:\n{chunk.content}"
-                    contents_to_embed.append(contextualized_content)
-                    chunks_ordered.append(chunk)
-
-            # Step 3: Embed all contextualized contents
+            # Step 3: Embed all contents
             vectors = self.embedder.embed_batch(contents_to_embed)
 
             # Step 4: Add to vector store
-            chunk_ids = [chunk.id for chunk in chunks_ordered]
+            chunk_ids = [chunk.id for chunk in chunks]
             faiss_ids = self.vector_store.add(vectors, chunk_ids)
 
             # Step 5: Update chunks with embedding IDs
-            for chunk, faiss_id in zip(chunks_ordered, faiss_ids):
+            for chunk, faiss_id in zip(chunks, faiss_ids):
                 chunk.embedding_id = faiss_id
             
-            logger.info(f"✅ Indexed {len(chunks)} chunks")
+            logger.info(f"Indexed {len(chunks)} chunks")
             
             return len(chunks)
             
@@ -459,6 +442,64 @@ class RAGService:
         chunks = db.get_chunks_by_ids(chunk_ids)
         
         return list(zip(chunks, scores))
+    
+    def search_anomalies(
+        self,
+        text: str = None,
+        top_k: int = 10,
+        min_severity: float = 0.0
+    ) -> List[Tuple[LogChunk, float]]:
+        """
+        Search for anomalous log entries.
+        
+        Filters results to only return chunks flagged as anomalies by
+        the Helix Vector system.
+        
+        Args:
+            text: Optional search text (if None, returns all anomalies)
+            top_k: Maximum number of results
+            min_severity: Minimum severity weight to include
+            
+        Returns:
+            List of (chunk, score) tuples, only anomalous entries
+        """
+        try:
+            anomalies = []
+            
+            if text:
+                # Search with text, then filter anomalies
+                results = self.search_similar(text, top_k=top_k * 3)
+                for chunk, score in results:
+                    # Safe attribute access for chunks that may not have Helix annotations
+                    if getattr(chunk, 'is_anomaly', False):
+                        severity = getattr(chunk, 'severity_weight', 0.0)
+                        if severity >= min_severity:
+                            anomalies.append((chunk, score))
+            else:
+                # Get all chunks from vector store and filter
+                # Use search_similar with empty query as fallback
+                try:
+                    all_chunks = db.get_recent_chunks(limit=top_k * 3)
+                except AttributeError:
+                    # db.get_recent_chunks may not exist - use empty list
+                    logger.warning("db.get_recent_chunks not available, using empty results")
+                    all_chunks = []
+                
+                for chunk in all_chunks:
+                    if getattr(chunk, 'is_anomaly', False):
+                        severity = getattr(chunk, 'severity_weight', 0.0)
+                        if severity >= min_severity:
+                            score = getattr(chunk, 'anomaly_score', 0.0)
+                            anomalies.append((chunk, score))
+            
+            # Sort by anomaly score (most anomalous first)
+            anomalies.sort(key=lambda x: getattr(x[0], 'anomaly_score', 0.0), reverse=True)
+            
+            return anomalies[:top_k]
+            
+        except Exception as e:
+            logger.error("Error in search_anomalies: %s", e)
+            return []
     
     def get_stats(self) -> dict:
         """Get statistics about the RAG system"""

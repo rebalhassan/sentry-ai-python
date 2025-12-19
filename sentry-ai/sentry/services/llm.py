@@ -6,7 +6,7 @@ Generates natural language responses based on retrieved context
 
 import logging
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Generator
 import json
 import ollama
 from ..core.models import LogChunk
@@ -19,14 +19,24 @@ try:
 except ImportError:
     TENACITY_AVAILABLE = False
 
+# Try to import OpenAI SDK for OpenRouter (OpenAI-compatible API)
+try:
+    from openai import OpenAI
+    OPENAI_SDK_AVAILABLE = True
+except ImportError:
+    OPENAI_SDK_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 class LLMClient:
     """
-    Client for interacting with Ollama LLM
+    Client for interacting with LLMs (Ollama local or OpenRouter cloud)
     
-    Ollama runs locally and serves models like Llama 3.
-    This client formats prompts, sends requests, and parses responses.
+    Supports two backends:
+    - Ollama: Runs locally and serves models like Llama 3
+    - OpenRouter: Cloud API with access to various LLMs (including free tiers)
+    
+    Use query_cloud() for cloud inference, generate() for local inference.
     """
     
     def __init__(
@@ -55,10 +65,26 @@ class LLMClient:
         # Configure ollama client
         self.client = ollama.Client(host=self.host)
         
+        # Configure OpenRouter cloud client (if SDK available and API key set)
+        self.cloud_client = None
+        self.cloud_model = settings.openrouter_model
+        self.use_cloud = settings.use_cloud_llm
+        
+        if OPENAI_SDK_AVAILABLE and settings.openrouter_api_key:
+            self.cloud_client = OpenAI(
+                base_url=settings.openrouter_base_url,
+                api_key=settings.openrouter_api_key,
+            )
+            logger.info(f"☁️ OpenRouter cloud client initialized")
+            logger.info(f"   Cloud Model: {self.cloud_model}")
+        elif settings.openrouter_api_key and not OPENAI_SDK_AVAILABLE:
+            logger.warning("OpenRouter API key set but openai package not installed. Install with: pip install openai")
+        
         logger.info(f"LLM Client initialized")
-        logger.info(f"  Model: {self.model}")
+        logger.info(f"  Local Model: {self.model}")
         logger.info(f"  Host: {self.host}")
         logger.info(f"  Temperature: {self.temperature}")
+        logger.info(f"  Use Cloud: {self.use_cloud}")
         
         # Verify connection
         self._verify_connection()
@@ -190,6 +216,245 @@ class LLMClient:
                 logger.error(f"LLM generation failed: {e}")
                 raise
     
+    # ===== OPENROUTER CLOUD METHODS =====
+    
+    def query_cloud(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: float = None,
+        max_tokens: int = None
+    ) -> str:
+        """
+        Query OpenRouter cloud LLMs
+        
+        Uses OpenRouter's OpenAI-compatible API to access various LLMs,
+        including free tier models like meta-llama/llama-4-maverick:free
+        
+        Args:
+            prompt: The user prompt
+            system_prompt: System instructions (optional)
+            model: Override cloud model (e.g., "google/gemini-2.0-flash-lite-preview-02-05:free")
+            temperature: Override default temperature
+            max_tokens: Max tokens to generate
+            
+        Returns:
+            Generated text from cloud LLM
+            
+        Raises:
+            RuntimeError: If cloud client is not configured
+        """
+        if self.cloud_client is None:
+            raise RuntimeError(
+                "OpenRouter cloud client not configured. "
+                "Set SENTRY_OPENROUTER_API_KEY environment variable and install openai: pip install openai"
+            )
+        
+        temperature = temperature if temperature is not None else self.temperature
+        max_tokens = max_tokens or settings.llm_max_tokens
+        model = model or self.cloud_model
+        
+        messages = []
+        
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        
+        messages.append({
+            "role": "user",
+            "content": prompt
+        })
+        
+        return self._query_cloud_with_retry(messages, model, temperature, max_tokens)
+    
+    def _query_cloud_with_retry(
+        self,
+        messages: List[Dict],
+        model: str,
+        temperature: float,
+        max_tokens: int
+    ) -> str:
+        """
+        Internal method with retry logic for cloud LLM generation
+        Retries up to 3 times with exponential backoff on connection errors
+        """
+        max_attempts = 3
+        base_wait = 2  # seconds
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.debug(f"Sending request to OpenRouter ({model})... (attempt {attempt}/{max_attempts})")
+                
+                response = self.cloud_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra_headers={
+                        "HTTP-Referer": "https://github.com/sentry-ai",
+                        "X-Title": "Sentry-AI"
+                    }
+                )
+                
+                answer = response.choices[0].message.content
+                
+                logger.debug(f"☁️ Got cloud response ({len(answer)} chars)")
+                
+                return answer
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                # Retry on connection/timeout/rate-limit errors
+                if any(x in error_str for x in ['timeout', 'connection', 'rate', '429', '503', '502']):
+                    if attempt < max_attempts:
+                        wait_time = base_wait * (2 ** (attempt - 1))
+                        logger.warning(f"Cloud LLM request failed (attempt {attempt}/{max_attempts}): {e}. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Cloud LLM generation failed after {max_attempts} attempts: {e}")
+                        raise
+                else:
+                    # Don't retry on other errors
+                    logger.error(f"Cloud LLM generation failed: {e}")
+                    raise
+    
+    def stream_cloud(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None
+    ) -> Generator[str, None, None]:
+        """
+        Stream response from OpenRouter cloud LLM token by token
+        
+        Args:
+            prompt: The user prompt
+            system_prompt: System instructions (optional)
+            model: Override cloud model
+            
+        Yields:
+            Chunks of text as they're generated
+            
+        Raises:
+            RuntimeError: If cloud client is not configured
+        """
+        if self.cloud_client is None:
+            raise RuntimeError(
+                "OpenRouter cloud client not configured. "
+                "Set SENTRY_OPENROUTER_API_KEY environment variable and install openai: pip install openai"
+            )
+        
+        model = model or self.cloud_model
+        
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        try:
+            stream = self.cloud_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=self.temperature,
+                stream=True,
+                extra_headers={
+                    "HTTP-Referer": "https://github.com/sentry-ai",
+                    "X-Title": "Sentry-AI"
+                }
+            )
+            
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            logger.error(f"Cloud streaming failed: {e}")
+            raise
+    
+    def generate_with_context_cloud(
+        self,
+        query: str,
+        context_chunks: List[LogChunk],
+        system_prompt: Optional[str] = None,
+        chat_context: Optional[str] = None
+    ) -> str:
+        """
+        Generate response using retrieved context via cloud LLM (RAG)
+        
+        Same as generate_with_context but uses OpenRouter cloud.
+        
+        Args:
+            query: User's question
+            context_chunks: Relevant log chunks from search
+            system_prompt: Custom system prompt (uses default if None)
+            chat_context: Previous conversation for continuity
+            
+        Returns:
+            LLM's answer from cloud
+        """
+        # Use same prompt construction as local
+        if system_prompt is None:
+            system_prompt = """You are Sentry-AI, an expert system administrator and log analysis assistant.
+
+Your job is to analyze log files and help diagnose system issues.
+
+Guidelines:
+- Be concise and technical
+- Focus on root causes, not symptoms
+- Cite specific log entries when making claims
+- If you don't know, say so clearly
+- Suggest next steps for investigation
+- Use timestamps to establish sequence of events
+"""
+            if chat_context:
+                system_prompt += """
+- If the user refers to previous conversation, use that context to provide relevant answers
+"""
+        
+        # Build context from chunks
+        context_text = self._format_context(context_chunks)
+        
+        # Build the full prompt
+        prompt_parts = []
+        
+        if chat_context:
+            prompt_parts.append(f"CONVERSATION HISTORY:\n{chat_context}\n")
+        
+        prompt_parts.append(f"""Based on the following log entries, answer this question:
+
+QUESTION: {query}
+
+LOG ENTRIES:
+{context_text}
+
+Provide a clear, actionable answer based ONLY on the log entries above. If the logs don't contain enough information to answer, say so.""")
+        
+        prompt = "\n".join(prompt_parts)
+        
+        return self.query_cloud(prompt, system_prompt=system_prompt)
+    
+    def is_cloud_available(self) -> bool:
+        """Check if cloud client is configured and available"""
+        return self.cloud_client is not None
+    
+    def set_use_cloud(self, enabled: bool):
+        """
+        Toggle between cloud and local LLM at runtime
+        
+        Args:
+            enabled: True for OpenRouter cloud, False for Ollama local
+        """
+        if enabled and self.cloud_client is None:
+            raise RuntimeError(
+                "Cannot enable cloud mode - OpenRouter not configured. "
+                "Set SENTRY_OPENROUTER_API_KEY environment variable."
+            )
+        self.use_cloud = enabled
+        logger.info(f"LLM mode switched to: {'Cloud (OpenRouter)' if enabled else 'Local (Ollama)'}")
+    
     def generate_with_context(
         self,
         query: str,
@@ -261,18 +526,24 @@ Provide a clear, actionable answer based ONLY on the log entries above. If the l
     
     def _format_context(self, chunks: List[LogChunk]) -> str:
         """
-        Format log chunks into a readable context string
+        Format log chunks into a readable context string.
+        
+        Includes Helix Vector annotations for anomalous chunks:
+        - Anomaly type and score
+        - Severity weight
+        - Cluster template
         
         Args:
             chunks: List of log chunks
             
         Returns:
-            Formatted context string
+            Formatted context string with anomaly annotations
         """
         if not chunks:
             return "(No log entries found)"
         
         context_lines = []
+        anomaly_summary = []
         
         for i, chunk in enumerate(chunks, 1):
             # Format timestamp
@@ -288,11 +559,33 @@ Provide a clear, actionable answer based ONLY on the log entries above. If the l
             elif 'event_id' in chunk.metadata:
                 source_info = f" [EventID: {chunk.metadata['event_id']}]"
             
+            # Build anomaly annotation if flagged
+            anomaly_marker = ""
+            if chunk.is_anomaly:
+                anomaly_marker = f" **ANOMALY: {chunk.anomaly_type}** (score: {chunk.anomaly_score:.2f})"
+                anomaly_summary.append({
+                    "index": i,
+                    "type": chunk.anomaly_type,
+                    "score": chunk.anomaly_score,
+                    "severity": chunk.severity_weight,
+                })
+            
             # Build entry
-            entry = f"""[{i}] {timestamp} | {level}{source_info}
+            entry = f"""[{i}] {timestamp} | {level}{source_info}{anomaly_marker}
 {chunk.content}
 """
             context_lines.append(entry)
+        
+        # Add anomaly summary at the top if any anomalies were found
+        if anomaly_summary:
+            summary_header = ["### Detected Anomalies Summary"]
+            for a in anomaly_summary:
+                summary_header.append(
+                    f"- Entry [{a['index']}]: {a['type']} "
+                    f"(severity: {a['severity']:.1f}, score: {a['score']:.2f})"
+                )
+            summary_header.append("")
+            return "\n".join(summary_header) + "\n" + "\n".join(context_lines)
         
         return "\n".join(context_lines)
     
