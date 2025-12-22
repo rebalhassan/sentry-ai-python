@@ -17,6 +17,7 @@ from ..core.security import sanitize_query
 from .embedding import get_embedder
 from .vectorstore import get_vector_store
 from .llm import get_llm_client
+from .intent import get_classifier, QueryIntent
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,13 @@ class RAGService:
         self.embedder = get_embedder()
         self.vector_store = get_vector_store()
         self.llm = get_llm_client()
+        self.classifier = get_classifier()  # Intent classification
         
         logger.info("✅ RAG service ready")
         logger.info(f"   Embedder: {self.embedder.model_name}")
         logger.info(f"   Vector store: {len(self.vector_store)} vectors")
         logger.info(f"   LLM: {self.llm.model}")
+        logger.info(f"   Intent Classifier: {self.classifier}")
     
     def query(
         self,
@@ -104,25 +107,79 @@ class RAGService:
             logger.info(f"  with chat context ({len(chat_context)} chars)")
         
         try:
+            # Step 0.5: Classify query intent for optimal routing
+            intent_result = self.classifier.classify(query_text)
+            logger.info("=" * 60)
+            logger.info(f"🔍 SEMANTIC SEARCH STARTED")
+            logger.info(f"   Query: '{query_text}'")
+            logger.info(f"   Intent: {intent_result.intent.value}")
+            logger.info(f"   Confidence: {intent_result.confidence:.0%}")
+            logger.info(f"   Routing: {intent_result.routing_hint}")
+            if intent_result.subject:
+                logger.info(f"   Subject: '{intent_result.subject}'")
+            logger.info("=" * 60)
+            
+            # Route to specialized handlers based on intent
+            # Each handler returns None if it wants to fallback to standard RAG
+            routed_result = None
+            
+            if intent_result.routing_hint == "trace_vectordb":
+                # FREQUENCY queries -> Use Helix cluster statistics
+                logger.info("🚀 Routing to FREQUENCY handler")
+                routed_result = self._handle_frequency_query(
+                    query_text, intent_result, chat_context
+                )
+            
+            elif intent_result.routing_hint == "helix_anomalies":
+                # ERROR/ANOMALY queries -> Use Helix anomaly data
+                logger.info("🚀 Routing to ANOMALY handler")
+                routed_result = self._handle_anomaly_query(
+                    query_text, intent_result, chat_context
+                )
+            
+            elif intent_result.routing_hint == "similarity_search":
+                # SIMILAR queries -> Pattern matching in clusters
+                logger.info("🚀 Routing to SIMILAR handler")
+                routed_result = self._handle_similar_query(
+                    query_text, intent_result, chat_context
+                )
+            
+            # If specialized handler succeeded, return its result
+            if routed_result is not None:
+                return routed_result
+            
+            # Otherwise, fall through to standard RAG vector search
+            logger.info("📚 Using standard RAG vector search")
+            
             # Step 1: Expand the query (if it's a natural language question)
             # We keep the original query for the final LLM answer, but use expanded for search
             expanded_query = self.llm.expand_query(query_text)
+            if expanded_query != query_text:
+                logger.info(f"   Expanded query: '{expanded_query}'")
             
             # Step 2: Embed the query (using cached embedding for repeated queries)
-            logger.debug("Step 2: Embedding query...")
+            logger.info("📊 Step 2: Embedding query...")
             query_vector = self.embedder.embed_text_cached(expanded_query)
             
             # Step 3: Search vector store
-            logger.debug("Step 3: Searching vector store...")
+            logger.info("🔎 Step 3: Searching vector store...")
             chunk_ids, scores = self.vector_store.search_with_threshold(
                 query_vector,
                 k=top_k,
                 threshold=similarity_threshold
             )
             
+            # Log search results in detail
+            logger.info("-" * 40)
+            logger.info(f"📋 SEARCH RESULTS: {len(chunk_ids)} chunks found")
+            logger.info(f"   Threshold: {similarity_threshold}")
+            for i, (cid, score) in enumerate(zip(chunk_ids, scores)):
+                logger.info(f"   [{i+1}] ID={cid} | Score={score:.4f}")
+            logger.info("-" * 40)
+            
             # Task 3: If no chunks found, fall back to LLM inference without context
             if not chunk_ids:
-                logger.warning("No relevant chunks found - falling back to LLM inference")
+                logger.warning("⚠️ No relevant chunks found - falling back to LLM inference")
                 
                 # Build prompt with chat context if available
                 fallback_prompt = query_text
@@ -145,19 +202,35 @@ class RAGService:
                     chunk_ids=[]
                 )
             
-            logger.info(f"  Found {len(chunk_ids)} relevant chunks")
+            logger.info(f"✅ Found {len(chunk_ids)} relevant chunks")
             
             # Step 3: Retrieve full chunks from database
-            logger.debug("Step 3: Retrieving chunks from database...")
+            logger.info("📥 Step 3: Retrieving chunks from database...")
             chunks = db.get_chunks_by_ids(chunk_ids)
+            
+            # Log chunk content previews
+            logger.info("-" * 40)
+            logger.info("📝 CHUNK CONTENT PREVIEWS:")
+            for i, (chunk, score) in enumerate(zip(chunks, scores)):
+                preview = chunk.content[:100].replace('\n', ' ').strip()
+                if len(chunk.content) > 100:
+                    preview += "..."
+                logger.info(f"   [{i+1}] Score={score:.3f}")
+                logger.info(f"       Content: {preview}")
+                if chunk.is_anomaly:
+                    logger.info(f"       ⚠️ ANOMALY: type={chunk.anomaly_type}")
+            logger.info("-" * 40)
             
             # Step 4: Optional reranking (BM25 for exact keyword matches)
             if use_reranking:
-                logger.debug("Step 4: Reranking with BM25...")
+                logger.info("🔄 Step 4: Reranking with BM25...")
                 chunks, scores = self._rerank_bm25(query_text, chunks, scores)
+                logger.info("   Reranked order:")
+                for i, (chunk, score) in enumerate(zip(chunks, scores)):
+                    logger.info(f"   [{i+1}] Score={score:.3f} | ID={chunk.id}")
             
             # Step 5: Generate answer with LLM
-            logger.debug("Step 5: Generating answer with LLM...")
+            logger.info("🤖 Step 5: Generating answer with LLM...")
             
             # Task 2: Include chat context in the generation
             answer = self.llm.generate_with_context(
@@ -171,8 +244,12 @@ class RAGService:
             
             query_time = time.time() - start_time
             
-            logger.info(f"✅ Query completed in {query_time:.2f}s")
+            logger.info("=" * 60)
+            logger.info(f"✅ QUERY COMPLETED in {query_time:.2f}s")
+            logger.info(f"   Chunks used: {len(chunks)}")
             logger.info(f"   Confidence: {confidence:.3f}")
+            logger.info(f"   Intent route: {intent_result.routing_hint}")
+            logger.info("=" * 60)
             
             return QueryResult(
                 answer=answer,
@@ -263,6 +340,289 @@ class RAGService:
         except Exception as e:
             logger.warning(f"Reranking failed: {e}, using original order")
             return chunks, vector_scores
+    
+    # ========== INTENT-BASED ROUTE HANDLERS ==========
+    
+    def _handle_frequency_query(
+        self,
+        query_text: str,
+        intent_result,
+        chat_context: str = None
+    ) -> QueryResult:
+        """
+        Handle FREQUENCY intent queries using Helix cluster statistics.
+        
+        For questions like "how often do errors occur?", "what's the most common pattern?"
+        Instead of searching vectors, we query structured cluster data.
+        """
+        start_time = time.time()
+        
+        logger.info("📊 FREQUENCY QUERY - Using Helix statistics")
+        
+        try:
+            from .helix import get_helix_service
+            helix = get_helix_service()
+            stats = helix.get_cluster_statistics()
+            
+            if not stats["total_clusters"]:
+                logger.warning("No cluster data available")
+                return QueryResult(
+                    answer="No log patterns have been indexed yet. Please index some logs first.",
+                    sources=[],
+                    confidence=0.0,
+                    query_time=time.time() - start_time,
+                    chunk_ids=[]
+                )
+            
+            # Log the statistics being used
+            logger.info("-" * 40)
+            logger.info(f"📈 CLUSTER STATISTICS:")
+            logger.info(f"   Total clusters: {stats['total_clusters']}")
+            logger.info(f"   Total logs: {stats['total_logs_processed']}")
+            logger.info(f"   Errors: {stats['error_count']} ({stats['error_percentage']:.1f}%)")
+            logger.info(f"   Warnings: {stats['warning_count']}")
+            logger.info(f"   Top patterns:")
+            for p in stats['top_patterns'][:5]:
+                logger.info(f"      [{p['count']}x] {p['template'][:60]}...")
+            logger.info("-" * 40)
+            
+            # Format context for LLM
+            context = self._format_structured_context(
+                "cluster_statistics",
+                stats,
+                query_text
+            )
+            
+            # Generate answer using structured data
+            system_prompt = """You are a log analysis assistant. Based on the cluster statistics provided, 
+answer the user's question about log patterns and frequencies. Be specific with numbers and percentages.
+Format your response clearly with key statistics highlighted."""
+            
+            prompt = f"{context}\n\nUser question: {query_text}"
+            if chat_context:
+                prompt = f"{chat_context}\n\n{prompt}"
+            
+            answer = self.llm.generate(prompt=prompt, system_prompt=system_prompt)
+            
+            query_time = time.time() - start_time
+            logger.info(f"✅ FREQUENCY query completed in {query_time:.2f}s")
+            
+            return QueryResult(
+                answer=answer,
+                sources=[],  # No chunks - we used structured data
+                confidence=0.9,  # High confidence for structured queries
+                query_time=query_time,
+                chunk_ids=[]
+            )
+            
+        except Exception as e:
+            logger.error(f"Frequency query failed: {e}", exc_info=True)
+            # Fallback to standard RAG
+            return None
+    
+    def _handle_anomaly_query(
+        self,
+        query_text: str,
+        intent_result,
+        chat_context: str = None
+    ) -> QueryResult:
+        """
+        Handle ERROR/ANOMALY intent queries using Helix anomaly data.
+        
+        For questions like "what errors occurred?", "show me anomalies"
+        """
+        start_time = time.time()
+        
+        logger.info("⚠️ ANOMALY QUERY - Using Helix error clusters")
+        
+        try:
+            from .helix import get_helix_service
+            helix = get_helix_service()
+            anomaly_summary = helix.get_anomalies_summary()
+            
+            if not anomaly_summary["total_error_clusters"]:
+                logger.info("No error clusters found, falling back to vector search")
+                return None  # Fallback to standard RAG
+            
+            # Log anomaly data
+            logger.info("-" * 40)
+            logger.info(f"🔴 ANOMALY SUMMARY:")
+            logger.info(f"   Error clusters: {anomaly_summary['total_error_clusters']}")
+            logger.info(f"   Severity: {anomaly_summary['severity_distribution']}")
+            for ec in anomaly_summary['error_clusters'][:3]:
+                logger.info(f"   [{ec['type']}] {ec['template'][:50]}...")
+            logger.info("-" * 40)
+            
+            # Also get some actual log chunks containing errors
+            # Search vector store for error-related content
+            query_vector = self.embedder.embed_text_cached("error failure exception crash timeout")
+            chunk_ids, scores = self.vector_store.search_with_threshold(
+                query_vector, k=5, threshold=0.4
+            )
+            
+            error_chunks = []
+            if chunk_ids:
+                error_chunks = db.get_chunks_by_ids(chunk_ids)
+                # Filter to only actual anomalies
+                error_chunks = [c for c in error_chunks if c.is_anomaly or c.log_level.value in ("error", "critical")]
+            
+            # Format context
+            context = self._format_structured_context(
+                "anomaly_summary",
+                anomaly_summary,
+                query_text
+            )
+            
+            # Add sample log content if available
+            if error_chunks:
+                context += "\n\n## Sample Error Logs:\n"
+                for i, chunk in enumerate(error_chunks[:3]):
+                    context += f"\n### Error {i+1}:\n```\n{chunk.content[:300]}\n```\n"
+            
+            # Generate answer
+            system_prompt = """You are a log analysis assistant specializing in error detection.
+Based on the anomaly summary and error logs provided, explain what errors and problems were detected.
+Be specific about error types, severity, and frequency. Suggest potential causes if patterns are clear."""
+            
+            prompt = f"{context}\n\nUser question: {query_text}"
+            if chat_context:
+                prompt = f"{chat_context}\n\n{prompt}"
+            
+            answer = self.llm.generate(prompt=prompt, system_prompt=system_prompt)
+            
+            query_time = time.time() - start_time
+            logger.info(f"✅ ANOMALY query completed in {query_time:.2f}s")
+            
+            return QueryResult(
+                answer=answer,
+                sources=error_chunks,
+                confidence=0.85,
+                query_time=query_time,
+                chunk_ids=chunk_ids if chunk_ids else []
+            )
+            
+        except Exception as e:
+            logger.error(f"Anomaly query failed: {e}", exc_info=True)
+            return None
+    
+    def _handle_similar_query(
+        self,
+        query_text: str,
+        intent_result,
+        chat_context: str = None
+    ) -> QueryResult:
+        """
+        Handle SIMILAR intent queries by searching cluster patterns.
+        
+        For questions like "find patterns similar to timeout", "related errors"
+        """
+        start_time = time.time()
+        
+        logger.info("🔗 SIMILAR QUERY - Pattern matching in clusters")
+        
+        try:
+            from .helix import get_helix_service
+            helix = get_helix_service()
+            
+            # Use the extracted subject as search pattern
+            pattern = intent_result.subject if intent_result.subject else query_text
+            matches = helix.search_clusters_by_pattern(pattern)
+            
+            if not matches:
+                logger.info(f"No clusters match pattern '{pattern}', falling back")
+                return None
+            
+            logger.info("-" * 40)
+            logger.info(f"🔍 PATTERN MATCHES for '{pattern}':")
+            for m in matches[:5]:
+                logger.info(f"   [{m['count']}x] {m['template'][:60]}...")
+            logger.info("-" * 40)
+            
+            # Format context
+            context = f"## Pattern Search Results for: '{pattern}'\n\n"
+            context += f"Found {len(matches)} matching log patterns:\n\n"
+            for i, m in enumerate(matches[:10]):
+                context += f"{i+1}. **Occurrences: {m['count']}**\n"
+                context += f"   Template: `{m['template']}`\n"
+                context += f"   Severity: {m['severity']:.2f}\n\n"
+            
+            # Generate answer
+            system_prompt = """You are a log analysis assistant. Based on the pattern search results,
+explain what related log patterns were found. Group similar issues and highlight the most frequent ones."""
+            
+            prompt = f"{context}\n\nUser question: {query_text}"
+            if chat_context:
+                prompt = f"{chat_context}\n\n{prompt}"
+            
+            answer = self.llm.generate(prompt=prompt, system_prompt=system_prompt)
+            
+            query_time = time.time() - start_time
+            logger.info(f"✅ SIMILAR query completed in {query_time:.2f}s")
+            
+            return QueryResult(
+                answer=answer,
+                sources=[],
+                confidence=0.8,
+                query_time=query_time,
+                chunk_ids=[]
+            )
+            
+        except Exception as e:
+            logger.error(f"Similar query failed: {e}", exc_info=True)
+            return None
+    
+    def _format_structured_context(
+        self,
+        data_type: str,
+        data: dict,
+        query: str
+    ) -> str:
+        """
+        Format structured data into a context string for LLM.
+        """
+        if data_type == "cluster_statistics":
+            context = f"""## Log Cluster Statistics
+
+**Overview:**
+- Total unique log patterns (clusters): {data['total_clusters']}
+- Total log entries processed: {data['total_logs_processed']}
+- Error rate: {data['error_percentage']:.1f}%
+
+**Breakdown by Type:**
+- Errors: {data['error_count']}
+- Warnings: {data['warning_count']}  
+- Info/Other: {data['info_count']}
+
+**Top 10 Most Common Patterns:**
+"""
+            for i, p in enumerate(data['top_patterns'][:10]):
+                marker = "🔴" if p['is_error'] else ("⚠️" if p['is_warning'] else "ℹ️")
+                context += f"\n{i+1}. {marker} **{p['count']} occurrences**\n"
+                context += f"   Pattern: `{p['template']}`\n"
+            
+            return context
+        
+        elif data_type == "anomaly_summary":
+            context = f"""## Anomaly Detection Summary
+
+**Error Clusters Detected:** {data['total_error_clusters']}
+**Anomaly Threshold:** {data['anomaly_threshold']}
+
+**Severity Distribution:**
+- Critical: {data['severity_distribution']['critical']}
+- High: {data['severity_distribution']['high']}
+- Moderate: {data['severity_distribution']['moderate']}
+
+**Top Error Patterns:**
+"""
+            for i, ec in enumerate(data['error_clusters'][:10]):
+                context += f"\n{i+1}. **Type: {ec['type']}** (Severity: {ec['severity']:.2f})\n"
+                context += f"   Occurrences: {ec['count']}\n"
+                context += f"   Template: `{ec['template']}`\n"
+            
+            return context
+        
+        return str(data)
     
     def index_chunk(self, chunk: LogChunk) -> bool:
         """

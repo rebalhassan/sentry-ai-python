@@ -2,18 +2,16 @@ import streamlit as st
 import os
 import sys
 from datetime import datetime
-import time
-import asyncio
 
 # Add parent directory to path so we can import sentry modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sentry.services.llm import get_llm_client
-from sentry.services.eventviewer import EventViewerReader
 from sentry.services.rag import get_rag_service
+from sentry.services.helix import get_helix_service
 from sentry.core.models import LogChunk, LogLevel
+from sentry.core.config import settings
 from sentry.core.credentials import get_credential_manager
-from sentry.integrations import VercelIntegration, PostHogIntegration, DataDogIntegration
 
 # Page config
 st.set_page_config(
@@ -23,22 +21,37 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize services
+# Initialize services (cached for stability)
 @st.cache_resource
 def get_services():
+    """
+    Get services with caching.
+    
+    Services are cached for the lifetime of the app.
+    Use the "Reload Services" button to manually refresh.
+    """
     from sentry.core.config import settings
+    
     return {
         "llm": get_llm_client(),
         "rag": get_rag_service(),
-        "reader": EventViewerReader(),
+        "helix": get_helix_service() if settings.helix_enabled else None,
         "credentials": get_credential_manager()
     }
 
 # Clear cache button in sidebar (placed early so user can see it)
 if st.sidebar.button("🔄 Reload Services", help="Clear cache and reload services with latest config"):
+    # Reset singletons only when explicitly requested
+    import sentry.services.llm as llm_module
+    import sentry.services.rag as rag_module
+    import sentry.services.helix as helix_module
+    llm_module._llm_client = None
+    rag_module._rag_service = None
+    helix_module._helix_service = None
     st.cache_resource.clear()
     st.rerun()
 
+# Get cached services (stable across reruns)
 services = get_services()
 
 # Session state initialization
@@ -54,180 +67,12 @@ if "log_count" not in st.session_state:
 if "chunks_to_index" not in st.session_state:
     st.session_state.chunks_to_index = []
 
+# Track which file was indexed (survives across all reruns)
+if "indexed_file" not in st.session_state:
+    st.session_state.indexed_file = None
 
-def render_integration_ui(service_name: str, service_class, credential_schema: dict):
-    """Render UI for a specific integration service"""
-    st.subheader(f"{service_name.title()}")
-    
-    # Check if credentials exist
-    creds = services["credentials"].get_credentials(service_name)
-    has_creds = creds is not None
-    
-    # Credentials section
-    with st.expander("🔑 Credentials", expanded=not has_creds):
-        if has_creds:
-            st.success(f"✅ Credentials configured")
-            if st.button(f"Delete {service_name.title()} Credentials", key=f"delete_{service_name}"):
-                services["credentials"].delete_credentials(service_name)
-                st.rerun()
-        else:
-            st.warning(f"No credentials configured for {service_name.title()}")
-        
-        # Credential input form
-        with st.form(f"{service_name}_creds_form"):
-            st.write(f"**Configure {service_name.title()} Credentials**")
-            
-            cred_values = {}
-            for field, info in credential_schema.items():
-                if info.get("required"):
-                    cred_values[field] = st.text_input(
-                        info["label"],
-                        type="password" if "key" in field.lower() else "default",
-                        help=info.get("help", "")
-                    )
-                else:
-                    cred_values[field] = st.text_input(
-                        info["label"],
-                        help=info.get("help", "")
-                    )
-            
-            if st.form_submit_button("Save Credentials"):
-                try:
-                    # Filter out empty optional fields
-                    filtered_creds = {k: v for k, v in cred_values.items() if v}
-                    services["credentials"].store_credentials(service_name, filtered_creds)
-                    st.success(f"✅ {service_name.title()} credentials saved!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error saving credentials: {e}")
-    
-    # Only show fetch UI if credentials are configured
-    if not has_creds:
-        st.info(f"Configure credentials above to fetch logs from {service_name.title()}")
-        return
-    
-    # Fetch logs section
-    with st.expander("📥 Fetch Logs", expanded=True):
-        try:
-            # Create integration instance
-            integration = service_class(creds)
-            
-            # Async wrapper for sync Streamlit
-            def run_async(coro):
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    return loop.run_until_complete(coro)
-                finally:
-                    loop.close()
-            
-            # List projects
-            if st.button(f"List {service_name.title()} Projects", key=f"list_projects_{service_name}"):
-                with st.spinner("Fetching projects..."):
-                    try:
-                        projects = run_async(integration.list_projects())
-                        st.session_state[f"{service_name}_projects"] = projects
-                        st.success(f"Found {len(projects)} projects")
-                    except Exception as e:
-                        st.error(f"Error fetching projects: {e}")
-            
-            # Show projects if available
-            if f"{service_name}_projects" in st.session_state:
-                projects = st.session_state[f"{service_name}_projects"]
-                
-                if projects:
-                    project_options = {f"{p.name} ({p.id})": p.id for p in projects}
-                    selected_project = st.selectbox(
-                        "Select Project",
-                        options=list(project_options.keys()),
-                        key=f"project_select_{service_name}"
-                    )
-                    
-                    if selected_project:
-                        project_id = project_options[selected_project]
-                        
-                        # List deployments
-                        if st.button(f"List Deployments", key=f"list_deployments_{service_name}"):
-                            with st.spinner("Fetching deployments..."):
-                                try:
-                                    deployments = run_async(integration.list_deployments(project_id))
-                                    st.session_state[f"{service_name}_deployments"] = deployments
-                                    st.success(f"Found {len(deployments)} deployments")
-                                except Exception as e:
-                                    st.error(f"Error fetching deployments: {e}")
-                        
-                        # Show deployments if available
-                        if f"{service_name}_deployments" in st.session_state:
-                            deployments = st.session_state[f"{service_name}_deployments"]
-                            
-                            if deployments:
-                                deployment_options = {f"{d.name} - {d.state}": d.id for d in deployments}
-                                selected_deployment = st.selectbox(
-                                    "Select Deployment/Time Period",
-                                    options=list(deployment_options.keys()),
-                                    key=f"deployment_select_{service_name}"
-                                )
-                                
-                                if selected_deployment:
-                                    deployment_id = deployment_options[selected_deployment]
-                                    
-                                    # Fetch logs
-                                    col1, col2 = st.columns([3, 1])
-                                    with col1:
-                                        log_limit = st.number_input(
-                                            "Max Logs",
-                                            min_value=10,
-                                            max_value=1000,
-                                            value=100,
-                                            key=f"log_limit_{service_name}"
-                                        )
-                                    
-                                    if st.button(f"Fetch Logs", type="primary", key=f"fetch_logs_{service_name}"):
-                                        with st.spinner(f"Fetching logs from {service_name.title()}..."):
-                                            try:
-                                                logs = run_async(integration.fetch_logs(
-                                                    project_id=project_id,
-                                                    deployment_id=deployment_id,
-                                                    limit=log_limit
-                                                ))
-                                                
-                                                if logs:
-                                                    # Convert to LogChunks
-                                                    chunks = []
-                                                    for log in logs:
-                                                        # Map log levels
-                                                        level_map = {
-                                                            "debug": LogLevel.DEBUG,
-                                                            "info": LogLevel.INFO,
-                                                            "warning": LogLevel.WARNING,
-                                                            "error": LogLevel.ERROR,
-                                                            "critical": LogLevel.ERROR,
-                                                        }
-                                                        
-                                                        chunk = LogChunk(
-                                                            id=log.id,
-                                                            source_id=f"{service_name}_{deployment_id}",
-                                                            content=log.message,
-                                                            timestamp=log.timestamp,
-                                                            log_level=level_map.get(log.level.value, LogLevel.INFO),
-                                                            metadata={
-                                                                "integration": service_name,
-                                                                "source": log.source,
-                                                                **log.metadata
-                                                            }
-                                                        )
-                                                        chunks.append(chunk)
-                                                    
-                                                    st.session_state.chunks_to_index = chunks
-                                                    st.success(f"✅ Fetched {len(chunks)} logs - ready to index!")
-                                                else:
-                                                    st.warning("No logs found")
-                                                    
-                                            except Exception as e:
-                                                st.error(f"Error fetching logs: {e}")
-        
-        except Exception as e:
-            st.error(f"Error initializing {service_name.title()} integration: {e}")
+
+
 
 
 def main():
@@ -237,99 +82,72 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        # Source Selection with tabs
-        tab1, tab2 = st.tabs(["📁 Local Sources", "🌐 External Sources"])
+        # File Upload - Single log source option
+        st.subheader("📁 Log Source")
         
-        with tab1:
-            # Original local source selection
-            source_type = st.radio(
-                "Select Log Source",
-                ["File", "Event Viewer"],
-                index=1
+        uploaded_file = st.file_uploader(
+            "Upload Log File", 
+            type=["log", "txt"],
+            help="Upload a .log or .txt file to analyze"
+        )
+        
+        if uploaded_file:
+            current_file_name = uploaded_file.name
+            
+            # Check if this file was ALREADY INDEXED (most important check)
+            already_indexed = (
+                st.session_state.indexed_file == current_file_name and
+                st.session_state.logs_indexed
             )
             
-            if source_type == "File":
-                uploaded_file = st.file_uploader("Upload Log File", type=["log", "txt"])
-                if uploaded_file:
-                    # Save to temp file to read
-                    content = uploaded_file.getvalue().decode("utf-8")
-                    lines = content.splitlines()
-                    st.info(f"Loaded {len(lines)} lines from file")
+            # Check if file is ready to index (processed but not indexed yet)
+            ready_to_index = (
+                "processed_file" in st.session_state and 
+                st.session_state.processed_file == current_file_name and
+                st.session_state.chunks_to_index
+            )
+            
+            if already_indexed:
+                # File is already indexed - DO NOT reset or reprocess
+                st.success(f"✅ File '{current_file_name}' already indexed")
+            elif ready_to_index:
+                # File processed, ready to index
+                st.info(f"📦 File '{current_file_name}' ready ({len(st.session_state.chunks_to_index)} chunks)")
+            else:
+                # NEW file - process it
+                content = uploaded_file.getvalue().decode("utf-8")
+                lines = [l for l in content.splitlines() if l.strip()]
+                st.info(f"📄 Loaded {len(lines)} log lines from file")
+                
+                # Use Helix to create windowed chunks (context stuffing)
+                if settings.helix_enabled and services["helix"]:
+                    # Reset Helix ONLY for truly new files
+                    services["helix"].reset()
                     
-                    # Convert to chunks (simple line-based for now)
+                    # Create windowed chunks
+                    st.session_state.chunks_to_index = services["helix"].create_windowed_chunks(
+                        logs=lines,
+                        source_id=f"file_{uploaded_file.name}",
+                        metadata_base={"file": uploaded_file.name}
+                    )
+                    st.success(f"✅ Created {len(st.session_state.chunks_to_index)} windowed chunks")
+                else:
+                    # Fallback: simple line-based chunks
                     st.session_state.chunks_to_index = []
                     for i, line in enumerate(lines):
-                        if line.strip():
-                            chunk = LogChunk(
-                                source_id=f"file_{uploaded_file.name}",
-                                content=line,
-                                timestamp=datetime.now(),
-                                log_level=LogLevel.INFO,
-                                metadata={"file": uploaded_file.name, "line": i+1}
-                            )
-                            st.session_state.chunks_to_index.append(chunk)
+                        chunk = LogChunk(
+                            source_id=f"file_{uploaded_file.name}",
+                            content=line,
+                            timestamp=datetime.now(),
+                            log_level=LogLevel.INFO,
+                            metadata={"file": uploaded_file.name, "line": i+1}
+                        )
+                        st.session_state.chunks_to_index.append(chunk)
+                    st.success(f"✅ Created {len(st.session_state.chunks_to_index)} chunks")
+                
+                # Mark as processed (but NOT indexed yet)
+                st.session_state.processed_file = current_file_name
 
-            else:  # Event Viewer
-                log_name = st.selectbox(
-                    "Select Event Log",
-                    ["System", "Application", "Security"]
-                )
-                
-                limit = st.number_input("Max Events", min_value=10, max_value=1000, value=100)
-                
-                if st.button("Fetch Events"):
-                    with st.spinner(f"Reading {log_name} logs..."):
-                        try:
-                            chunks = services["reader"].read_events(
-                                log_name=log_name,
-                                source_id=f"evt_{log_name}",
-                                max_events=limit
-                            )
-                            st.session_state.chunks_to_index = chunks
-                            st.success(f"Fetched {len(chunks)} events - ready to index!")
-                        except Exception as e:
-                            st.error(f"Error reading logs: {e}")
-        
-        with tab2:
-            # External integrations
-            st.write("**External Log Sources**")
-            
-            integration_service = st.selectbox(
-                "Select Service",
-                ["Vercel", "PostHog", "DataDog"],
-                key="integration_service_select"
-            )
-            
-            # Define credential schemas
-            credential_schemas = {
-                "vercel": {
-                    "api_key": {"label": "API Token", "required": True, "help": "Vercel Access Token from dashboard"},
-                    "team_id": {"label": "Team ID (optional)", "required": False, "help": "For team-scoped access"}
-                },
-                "posthog": {
-                    "api_key": {"label": "Personal API Key", "required": True, "help": "From PostHog project settings"},
-                    "project_id": {"label": "Project ID", "required": True, "help": "Your PostHog project ID"},
-                    "region": {"label": "Region (us/eu)", "required": False, "help": "Default: us"}
-                },
-                "datadog": {
-                    "api_key": {"label": "API Key", "required": True, "help": "DataDog API key"},
-                    "app_key": {"label": "Application Key", "required": True, "help": "DataDog application key"},
-                    "site": {"label": "Site (us1/us3/eu1)", "required": False, "help": "Default: us1"}
-                }
-            }
-            
-            integration_classes = {
-                "vercel": VercelIntegration,
-                "posthog": PostHogIntegration,
-                "datadog": DataDogIntegration
-            }
-            
-            service_key = integration_service.lower()
-            render_integration_ui(
-                service_key,
-                integration_classes[service_key],
-                credential_schemas[service_key]
-            )
 
         # Indexing Action (common for all sources)
         st.divider()
@@ -340,13 +158,33 @@ def main():
                     count = services["rag"].index_chunks_batch(st.session_state.chunks_to_index)
                     st.session_state.logs_indexed = True
                     st.session_state.log_count += count
+                    # Mark this file as indexed (prevents reset on future reruns)
+                    st.session_state.indexed_file = st.session_state.processed_file
                     st.session_state.chunks_to_index = []  # Clear after indexing
                     st.success(f"Indexed {count} chunks! RAG is ready.")
         
         st.divider()
         
-        # Display Current Model
-        st.info(f"Using Model: **{services['llm'].model}**")
+        # LLM Backend Selection
+        cloud_available = services["llm"].is_cloud_available()
+        
+        if cloud_available:
+            use_cloud = st.toggle(
+                "☁️ Use Cloud LLM (OpenRouter)",
+                value=services["llm"].use_cloud,
+                help="Toggle between local Ollama and OpenRouter cloud LLMs"
+            )
+            # Sync toggle state to service
+            if use_cloud != services["llm"].use_cloud:
+                services["llm"].set_use_cloud(use_cloud)
+            
+            if use_cloud:
+                st.info(f"☁️ Cloud Model: **{services['llm'].cloud_model}**")
+            else:
+                st.info(f"🖥️ Local Model: **{services['llm'].model}**")
+        else:
+            st.info(f"🖥️ Local Model: **{services['llm'].model}**")
+            st.caption("💡 Set `SENTRY_OPENROUTER_API_KEY` to enable cloud LLMs")
             
         # Global Context
         st.session_state.global_context = st.text_area(
@@ -360,10 +198,27 @@ def main():
         # Stats
         if st.session_state.logs_indexed:
             st.metric("Indexed Chunks", st.session_state.log_count)
+            
+            # Helix stats if enabled
+            if settings.helix_enabled and services["helix"]:
+                helix_stats = services["helix"].get_stats()
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Clusters", helix_stats["cluster_count"])
+                with col2:
+                    st.metric("Threshold", f"{helix_stats['anomaly_threshold']:.2f}")
+            
             if st.button("Clear Index"):
                 services["rag"].vector_store.clear()
                 st.session_state.logs_indexed = False
                 st.session_state.log_count = 0
+                st.rerun()
+        
+        # Clear Chat History
+        st.divider()
+        if st.session_state.messages:
+            if st.button("🗑️ Clear Chat History", help="Remove all chat messages"):
+                st.session_state.messages = []
                 st.rerun()
 
     # Main Chat Interface
@@ -404,7 +259,7 @@ def main():
                         system_prompt += f"\n\nContext provided by user:\n{st.session_state.global_context}"
                     
                     if use_rag and st.session_state.logs_indexed:
-                        # RAG Mode
+                        # RAG Mode - use vector search with LLM
                         result = services["rag"].query(prompt)
                         full_response = result.answer
                         
@@ -418,10 +273,17 @@ def main():
                                 
                     else:
                         # Standard Mode (Direct LLM)
-                        full_response = services["llm"].generate(
-                            prompt,
-                            system_prompt=system_prompt
-                        )
+                        # Check if cloud mode is enabled
+                        if services["llm"].use_cloud and services["llm"].is_cloud_available():
+                            full_response = services["llm"].query_cloud(
+                                prompt,
+                                system_prompt=system_prompt
+                            )
+                        else:
+                            full_response = services["llm"].generate(
+                                prompt,
+                                system_prompt=system_prompt
+                            )
                     
                     message_placeholder.markdown(full_response)
                     

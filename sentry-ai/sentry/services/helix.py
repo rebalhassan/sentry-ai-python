@@ -389,6 +389,177 @@ class HelixService:
             "anomaly_threshold": self.anomaly_threshold,
         }
     
+    # ========== QUERY METHODS FOR INTENT-BASED ROUTING ==========
+    
+    def get_cluster_statistics(self) -> Dict[str, Any]:
+        """
+        Get detailed cluster statistics for FREQUENCY intent queries.
+        
+        Returns structured data about:
+        - Total clusters and their occurrence counts
+        - Most common patterns
+        - Transition probabilities summary
+        
+        This is used by RAG when routing FREQUENCY queries.
+        """
+        if not self._codebook:
+            return {
+                "total_clusters": 0,
+                "clusters": [],
+                "top_patterns": [],
+                "total_logs_processed": 0,
+                "has_transitions": False
+            }
+        
+        # Build cluster info with counts
+        clusters = []
+        for cluster_id, info in self._codebook.items():
+            template = info.get("template", "")
+            count = info.get("count", 0)
+            clusters.append({
+                "id": cluster_id,
+                "template": template,
+                "count": count,
+                "is_error": any(kw in template.upper() for kw in ["ERROR", "FAIL", "CRITICAL", "FATAL"]),
+                "is_warning": "WARN" in template.upper()
+            })
+        
+        # Sort by count descending
+        clusters.sort(key=lambda x: x["count"], reverse=True)
+        
+        # Top 10 patterns
+        top_patterns = clusters[:10]
+        
+        # Count by type
+        error_count = sum(c["count"] for c in clusters if c["is_error"])
+        warning_count = sum(c["count"] for c in clusters if c["is_warning"])
+        info_count = sum(c["count"] for c in clusters) - error_count - warning_count
+        
+        return {
+            "total_clusters": len(self._codebook),
+            "total_logs_processed": sum(c["count"] for c in clusters),
+            "clusters": clusters,
+            "top_patterns": top_patterns,
+            "has_transitions": bool(self._transition_probs),
+            "error_count": error_count,
+            "warning_count": warning_count,
+            "info_count": info_count,
+            "error_percentage": error_count / max(sum(c["count"] for c in clusters), 1) * 100
+        }
+    
+    def get_anomalies_summary(self, chunks: List[LogChunk] = None) -> Dict[str, Any]:
+        """
+        Get anomaly summary for ERROR/ANOMALY intent queries.
+        
+        Args:
+            chunks: Optional list of chunks to analyze. If None, returns 
+                    template-level anomaly indicators.
+        
+        Returns structured anomaly data for LLM to explain.
+        """
+        # Get clusters that are likely error-related
+        error_clusters = []
+        for cluster_id, info in self._codebook.items():
+            template = info.get("template", "")
+            severity = self._get_severity_penalty(template)
+            if severity > 0.3:  # Moderate to high severity
+                anomaly_type = self._classify_anomaly_type(template)
+                error_clusters.append({
+                    "cluster_id": cluster_id,
+                    "template": template,
+                    "severity": severity,
+                    "type": anomaly_type,
+                    "count": info.get("count", 0)
+                })
+        
+        # Sort by severity
+        error_clusters.sort(key=lambda x: x["severity"], reverse=True)
+        
+        return {
+            "total_error_clusters": len(error_clusters),
+            "error_clusters": error_clusters[:10],  # Top 10
+            "severity_distribution": {
+                "critical": sum(1 for c in error_clusters if c["severity"] > 0.7),
+                "high": sum(1 for c in error_clusters if 0.5 < c["severity"] <= 0.7),
+                "moderate": sum(1 for c in error_clusters if 0.3 < c["severity"] <= 0.5),
+            },
+            "anomaly_threshold": self.anomaly_threshold
+        }
+    
+    def search_clusters_by_pattern(self, pattern: str) -> List[Dict[str, Any]]:
+        """
+        Search clusters by pattern match for SIMILAR intent queries.
+        
+        Args:
+            pattern: Search string (case-insensitive)
+            
+        Returns:
+            List of matching clusters with their info
+        """
+        if not pattern:
+            return []
+        
+        pattern_lower = pattern.lower()
+        matches = []
+        
+        for cluster_id, info in self._codebook.items():
+            template = info.get("template", "")
+            if pattern_lower in template.lower():
+                matches.append({
+                    "cluster_id": cluster_id,
+                    "template": template,
+                    "count": info.get("count", 0),
+                    "severity": self._get_severity_penalty(template)
+                })
+        
+        # Sort by count (frequency)
+        matches.sort(key=lambda x: x["count"], reverse=True)
+        return matches
+    
+    def get_transition_context(self, cluster_id: int) -> Dict[str, Any]:
+        """
+        Get transition context for a specific cluster (for WHY queries).
+        
+        Shows what typically happens before and after this cluster.
+        """
+        if cluster_id not in self._codebook:
+            return {"error": f"Cluster {cluster_id} not found"}
+        
+        # What leads TO this cluster
+        incoming = []
+        for from_c, transitions in self._transition_probs.items():
+            if cluster_id in transitions:
+                prob = transitions[cluster_id]
+                from_template = self._codebook.get(from_c, {}).get("template", "")
+                incoming.append({
+                    "from_cluster": from_c,
+                    "probability": prob,
+                    "template": from_template
+                })
+        
+        # What this cluster leads TO
+        outgoing = []
+        if cluster_id in self._transition_probs:
+            for to_c, prob in self._transition_probs[cluster_id].items():
+                to_template = self._codebook.get(to_c, {}).get("template", "")
+                outgoing.append({
+                    "to_cluster": to_c,
+                    "probability": prob,
+                    "template": to_template
+                })
+        
+        # Sort by probability
+        incoming.sort(key=lambda x: x["probability"], reverse=True)
+        outgoing.sort(key=lambda x: x["probability"], reverse=True)
+        
+        return {
+            "cluster_id": cluster_id,
+            "template": self._codebook[cluster_id].get("template", ""),
+            "count": self._codebook[cluster_id].get("count", 0),
+            "incoming_transitions": incoming[:5],  # Top 5
+            "outgoing_transitions": outgoing[:5]   # Top 5
+        }
+    
     def __repr__(self) -> str:
         status = "fitted" if self._fitted else "not fitted"
         return f"<HelixService(clusters={len(self._codebook)}, {status})>"
