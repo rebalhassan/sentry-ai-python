@@ -11,7 +11,7 @@ from sentry.services.rag import get_rag_service
 from sentry.services.helix import get_helix_service
 from sentry.core.models import LogChunk, LogLevel
 from sentry.core.config import settings
-from sentry.core.credentials import get_credential_manager
+
 
 # Page config
 st.set_page_config(
@@ -36,7 +36,6 @@ def get_services():
         "llm": get_llm_client(),
         "rag": get_rag_service(),
         "helix": get_helix_service() if settings.helix_enabled else None,
-        "credentials": get_credential_manager()
     }
 
 # Clear cache button in sidebar (placed early so user can see it)

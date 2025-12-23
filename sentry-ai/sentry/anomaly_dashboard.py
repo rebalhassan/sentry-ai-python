@@ -163,9 +163,8 @@ def get_severity_label(severity: float) -> str:
 
 
 def create_transition_heatmap(transition_probs: Dict[int, Dict[int, float]], codebook: Dict) -> go.Figure:
-    """Create a heatmap visualization of transition probabilities."""
+    """Create a heatmap visualization of transition probabilities with improved readability."""
     if not transition_probs:
-        # Return empty figure with message
         fig = go.Figure()
         fig.add_annotation(
             text="No transition data available yet",
@@ -175,61 +174,87 @@ def create_transition_heatmap(transition_probs: Dict[int, Dict[int, float]], cod
         )
         fig.update_layout(
             template="plotly_dark",
-            height=400,
+            height=500,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)'
         )
         return fig
     
-    # Get all cluster IDs
-    all_clusters = sorted(set(transition_probs.keys()) | 
-                         {to_c for probs in transition_probs.values() for to_c in probs.keys()})
+    # Get cluster IDs sorted by frequency (most common first)
+    cluster_counts = {cid: codebook.get(cid, {}).get("count", 0) for cid in 
+                      set(transition_probs.keys()) | 
+                      {to_c for probs in transition_probs.values() for to_c in probs.keys()}}
+    all_clusters = sorted(cluster_counts.keys(), key=lambda x: cluster_counts.get(x, 0), reverse=True)
     
-    # Limit to top 15 clusters for readability
-    if len(all_clusters) > 15:
-        all_clusters = all_clusters[:15]
+    # Limit to top 12 clusters for better readability
+    all_clusters = all_clusters[:12]
     
-    # Build matrix
+    # Build matrix and prepare hover text
     matrix = []
-    labels = []
+    hover_texts = []
+    
     for from_c in all_clusters:
         row = []
-        template = codebook.get(from_c, {}).get("template", f"Cluster {from_c}")
-        # Truncate long templates
-        label = template[:30] + "..." if len(template) > 30 else template
-        labels.append(f"[{from_c}] {label}")
+        hover_row = []
+        from_template = codebook.get(from_c, {}).get("template", f"Cluster {from_c}")
         
         for to_c in all_clusters:
             prob = transition_probs.get(from_c, {}).get(to_c, 0)
             row.append(prob)
+            to_template = codebook.get(to_c, {}).get("template", f"Cluster {to_c}")
+            hover_row.append(
+                f"<b>From [{from_c}]:</b><br>{from_template[:80]}<br><br>"
+                f"<b>To [{to_c}]:</b><br>{to_template[:80]}<br><br>"
+                f"<b>Probability:</b> {prob:.1%}"
+            )
         matrix.append(row)
+        hover_texts.append(hover_row)
     
-    # Create heatmap
+    # Use just cluster IDs for axis labels
+    axis_labels = [f"[{cid}]" for cid in all_clusters]
+    
+    # Create heatmap with custom hover
     fig = go.Figure(data=go.Heatmap(
         z=matrix,
-        x=labels,
-        y=labels,
+        x=axis_labels,
+        y=axis_labels,
         colorscale='Viridis',
         hoverongaps=False,
-        hovertemplate="From: %{y}<br>To: %{x}<br>Probability: %{z:.2%}<extra></extra>"
+        hoverinfo='text',
+        text=hover_texts,
+        colorbar=dict(
+            title=dict(text="Prob", side="right"),
+            tickformat=".0%",
+            thickness=15,
+            len=0.8
+        )
     ))
     
     fig.update_layout(
-        title=dict(text="Transition Probability Matrix", font=dict(size=16)),
+        title=dict(text="Transition Probability Matrix", font=dict(size=14, color="#fff")),
         template="plotly_dark",
         height=500,
-        margin=dict(l=10, r=10, t=40, b=10),
+        margin=dict(l=60, r=80, t=50, b=60),
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        xaxis=dict(tickangle=45, tickfont=dict(size=9)),
-        yaxis=dict(tickfont=dict(size=9))
+        xaxis=dict(
+            title="To Cluster",
+            tickfont=dict(size=11),
+            tickangle=0,
+            side="bottom"
+        ),
+        yaxis=dict(
+            title="From Cluster",
+            tickfont=dict(size=11),
+            autorange="reversed"
+        )
     )
     
     return fig
 
 
 def create_cluster_chart(codebook: Dict) -> go.Figure:
-    """Create a bar chart of cluster frequencies."""
+    """Create a bar chart of cluster frequencies with improved readability."""
     if not codebook:
         fig = go.Figure()
         fig.add_annotation(
@@ -240,13 +265,13 @@ def create_cluster_chart(codebook: Dict) -> go.Figure:
         )
         fig.update_layout(
             template="plotly_dark",
-            height=400,
+            height=500,
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)'
         )
         return fig
     
-    # Prepare data
+    # Prepare data with full templates for hover
     data = []
     for cluster_id, info in codebook.items():
         template = info.get("template", "")
@@ -255,46 +280,74 @@ def create_cluster_chart(codebook: Dict) -> go.Figure:
         # Determine color based on template content
         if any(kw in template.upper() for kw in ["FATAL", "CRITICAL"]):
             color = "#ff4b4b"
+            severity = "CRITICAL"
         elif any(kw in template.upper() for kw in ["ERROR", "FAIL"]):
             color = "#ff8c00"
+            severity = "ERROR"
         elif "WARN" in template.upper():
             color = "#ffd700"
+            severity = "WARNING"
         else:
             color = "#00d4ff"
+            severity = "INFO"
         
         data.append({
             "cluster_id": cluster_id,
-            "template": template[:40] + "..." if len(template) > 40 else template,
+            "template_short": f"[{cluster_id}]",
+            "template_full": template,
             "count": count,
-            "color": color
+            "color": color,
+            "severity": severity
         })
     
-    # Sort by count
+    # Sort by count and take top 10
     data.sort(key=lambda x: x["count"], reverse=True)
-    data = data[:15]  # Top 15
+    data = data[:10]
     
-    df = pd.DataFrame(data)
+    # Create custom hover text
+    hover_texts = [
+        f"<b>Cluster {d['cluster_id']}</b><br>"
+        f"<b>Count:</b> {d['count']}<br>"
+        f"<b>Severity:</b> {d['severity']}<br><br>"
+        f"<b>Template:</b><br>{d['template_full'][:100]}{'...' if len(d['template_full']) > 100 else ''}"
+        for d in data
+    ]
     
     fig = go.Figure(data=[
         go.Bar(
-            x=df["count"],
-            y=[f"[{d['cluster_id']}] {d['template']}" for d in data],
+            x=[d["count"] for d in data],
+            y=[d["template_short"] for d in data],
             orientation='h',
-            marker=dict(color=[d["color"] for d in data]),
-            hovertemplate="<b>Cluster %{customdata}</b><br>Count: %{x}<extra></extra>",
-            customdata=df["cluster_id"]
+            marker=dict(
+                color=[d["color"] for d in data],
+                line=dict(color='rgba(255,255,255,0.3)', width=1)
+            ),
+            hoverinfo='text',
+            hovertext=hover_texts,
+            text=[d["count"] for d in data],
+            textposition='outside',
+            textfont=dict(size=10, color="#fff")
         )
     ])
     
     fig.update_layout(
-        title=dict(text="Top Cluster Frequencies", font=dict(size=16)),
+        title=dict(text="Top Cluster Frequencies", font=dict(size=14, color="#fff")),
         template="plotly_dark",
-        height=450,
-        margin=dict(l=10, r=10, t=40, b=10),
+        height=500,
+        margin=dict(l=60, r=80, t=50, b=50),
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        yaxis=dict(tickfont=dict(size=10)),
-        xaxis=dict(title="Occurrence Count")
+        yaxis=dict(
+            title="Cluster ID",
+            tickfont=dict(size=12),
+            categoryorder='total ascending'
+        ),
+        xaxis=dict(
+            title="Occurrence Count",
+            tickfont=dict(size=10),
+            gridcolor='rgba(255,255,255,0.1)'
+        ),
+        bargap=0.3
     )
     
     return fig
@@ -628,7 +681,7 @@ def render_template_viewer():
 
 
 def render_anomaly_results():
-    """Render the anomaly detection results section."""
+    """Render the anomaly detection results section with sorting and filtering."""
     st.subheader("Anomaly Detection Results")
     
     chunks = st.session_state.chunks
@@ -638,11 +691,8 @@ def render_anomaly_results():
         st.info("No anomalies detected in the current log data.")
         return
     
-    # Sort by anomaly score
-    anomalous_chunks.sort(key=lambda x: x.anomaly_score, reverse=True)
-    
-    # Anomaly distribution chart
-    col1, col2 = st.columns([1, 2])
+    # Anomaly distribution chart - make it full width with summary
+    col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
         fig = create_anomaly_distribution(chunks)
@@ -659,60 +709,153 @@ def render_anomaly_results():
             fig = px.pie(
                 values=list(type_counts.values()),
                 names=list(type_counts.keys()),
-                title="Anomalies by Type",
-                hole=0.4,
-                color_discrete_sequence=px.colors.sequential.RdBu
+                title="By Type",
+                hole=0.5,
+                color_discrete_sequence=px.colors.qualitative.Set2
             )
             fig.update_layout(
                 template="plotly_dark",
                 height=300,
                 paper_bgcolor='rgba(0,0,0,0)',
-                margin=dict(l=10, r=10, t=40, b=10)
+                margin=dict(l=10, r=10, t=40, b=10),
+                showlegend=True,
+                legend=dict(orientation="h", yanchor="bottom", y=-0.3)
             )
+            fig.update_traces(textposition='inside', textinfo='value')
             st.plotly_chart(fig, use_container_width=True)
     
-    # Anomaly cards
+    with col3:
+        # Severity distribution
+        severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for c in anomalous_chunks:
+            if c.severity_weight >= 0.8:
+                severity_counts["CRITICAL"] += 1
+            elif c.severity_weight >= 0.5:
+                severity_counts["HIGH"] += 1
+            elif c.severity_weight >= 0.3:
+                severity_counts["MEDIUM"] += 1
+            else:
+                severity_counts["LOW"] += 1
+        
+        fig = px.bar(
+            x=list(severity_counts.keys()),
+            y=list(severity_counts.values()),
+            title="By Severity",
+            color=list(severity_counts.keys()),
+            color_discrete_map={
+                "CRITICAL": "#ff4b4b",
+                "HIGH": "#ff8c00",
+                "MEDIUM": "#ffd700",
+                "LOW": "#00d4ff"
+            }
+        )
+        fig.update_layout(
+            template="plotly_dark",
+            height=300,
+            paper_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=10, r=10, t=40, b=10),
+            showlegend=False,
+            xaxis_title="",
+            yaxis_title="Count"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Detected Anomalies with Sorting Controls
     st.write("### Detected Anomalies")
     
-    # Pagination
-    items_per_page = 10
-    total_pages = max(1, len(anomalous_chunks) // items_per_page + (1 if len(anomalous_chunks) % items_per_page else 0))
+    # Sorting and filtering controls
+    control_col1, control_col2, control_col3 = st.columns([1, 1, 2])
     
-    page = st.selectbox(
-        "Page",
-        range(1, total_pages + 1),
-        format_func=lambda x: f"Page {x} of {total_pages}"
-    )
+    with control_col1:
+        sort_by = st.selectbox(
+            "Sort by",
+            ["Score (High→Low)", "Score (Low→High)", "Severity (High→Low)", 
+             "Cluster ID", "Type"],
+            key="anomaly_sort"
+        )
+    
+    with control_col2:
+        items_per_page = st.selectbox(
+            "Show",
+            [10, 25, 50, 100],
+            key="anomaly_per_page"
+        )
+    
+    with control_col3:
+        type_filter = st.multiselect(
+            "Filter by Type",
+            options=sorted(set(c.anomaly_type for c in anomalous_chunks if c.anomaly_type)),
+            key="anomaly_type_filter"
+        )
+    
+    # Apply sorting
+    if sort_by == "Score (High→Low)":
+        anomalous_chunks.sort(key=lambda x: x.anomaly_score, reverse=True)
+    elif sort_by == "Score (Low→High)":
+        anomalous_chunks.sort(key=lambda x: x.anomaly_score)
+    elif sort_by == "Severity (High→Low)":
+        anomalous_chunks.sort(key=lambda x: x.severity_weight, reverse=True)
+    elif sort_by == "Cluster ID":
+        anomalous_chunks.sort(key=lambda x: x.cluster_id or 0)
+    elif sort_by == "Type":
+        anomalous_chunks.sort(key=lambda x: x.anomaly_type or "zzz")
+    
+    # Apply type filter
+    if type_filter:
+        anomalous_chunks = [c for c in anomalous_chunks if c.anomaly_type in type_filter]
+    
+    # Pagination
+    total_items = len(anomalous_chunks)
+    total_pages = max(1, (total_items + items_per_page - 1) // items_per_page)
+    
+    page_col1, page_col2 = st.columns([1, 3])
+    with page_col1:
+        page = st.selectbox(
+            "Page",
+            range(1, total_pages + 1),
+            format_func=lambda x: f"Page {x} of {total_pages}",
+            key="anomaly_page"
+        )
+    with page_col2:
+        st.caption(f"Showing {min(items_per_page, total_items - (page-1)*items_per_page)} of {total_items} anomalies")
     
     start_idx = (page - 1) * items_per_page
-    end_idx = start_idx + items_per_page
+    end_idx = min(start_idx + items_per_page, total_items)
     
+    # Render anomaly cards - ALL CLOSED by default
     for i, chunk in enumerate(anomalous_chunks[start_idx:end_idx], start=start_idx + 1):
-        severity_color = get_severity_color(chunk.severity_weight)
+        severity_label = get_severity_label(chunk.severity_weight)
+        source_info = chunk.metadata.get("filename", chunk.metadata.get("folder", "Unknown"))
         
         with st.expander(
-            f"**#{i}** | Score: {chunk.anomaly_score:.2f} | Type: {chunk.anomaly_type} | "
-            f"Cluster: {chunk.cluster_id}",
-            expanded=i <= start_idx + 3  # Expand first 3
+            f"**#{i}** | {severity_label} | Score: {chunk.anomaly_score:.2f} | "
+            f"Type: {chunk.anomaly_type} | Cluster: [{chunk.cluster_id}]",
+            expanded=False  # All closed by default
         ):
-            col1, col2, col3 = st.columns(3)
+            # Metrics row
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             
-            with col1:
+            with metric_col1:
                 st.metric("Anomaly Score", f"{chunk.anomaly_score:.3f}")
-            with col2:
+            with metric_col2:
                 st.metric("Transition Prob", f"{chunk.transition_prob:.3f}" if chunk.transition_prob else "N/A")
-            with col3:
-                st.metric("Severity", get_severity_label(chunk.severity_weight))
+            with metric_col3:
+                st.metric("Cluster ID", chunk.cluster_id)
+            with metric_col4:
+                st.metric("Source", source_info[:20])
             
-            st.write("**Template:**")
+            # Template
+            st.write("**Template Pattern:**")
             st.code(chunk.cluster_template or "N/A", language="text")
             
+            # Log content with syntax highlighting
             st.write("**Log Content:**")
-            st.code(chunk.content, language="text")
+            st.code(chunk.content, language="log")
             
+            # Metadata in collapsed section
             if chunk.metadata:
-                st.write("**Metadata:**")
-                st.json(chunk.metadata)
+                with st.popover("View Metadata"):
+                    st.json(chunk.metadata)
 
 
 def render_vector_search():
