@@ -15,6 +15,7 @@ enabling the RAG system to provide more structured context to the LLM.
 """
 
 import logging
+import re
 from typing import List, Dict, Any, Tuple, Optional
 from collections import defaultdict
 from datetime import datetime
@@ -39,17 +40,155 @@ class HelixService:
         annotated_chunks = helix.annotate_chunks(chunks)
     """
     
-    # Anomaly type classification keywords (static)
-    ANOMALY_TYPES = {
-        'database_timeout': ['database', 'db', 'sql', 'query', 'timeout'],
-        'database_connection_error': ['database', 'db', 'connection'],
+    # Anomaly type classification patterns (regex-based for better matching)
+    # Order matters: more specific patterns should come first
+    ANOMALY_PATTERNS = {
+        # Database errors (most specific first)
+        'database_timeout': [
+            r'\b(database|db|sql|query|mysql|postgres|mongo|redis)\b.*\b(timeout|timed?\s*out)\b',
+            r'\b(timeout|timed?\s*out)\b.*\b(database|db|sql|query)\b',
+        ],
+        'database_connection_error': [
+            r'\b(database|db|sql|mysql|postgres|mongo|redis)\b.*\b(connection|connect)\b.*\b(fail|error|refused|lost|reset)\b',
+            r'\bcannot connect to (database|db|mysql|postgres|mongo)\b',
+            r'\b(database|db)\b.*\bunreachable\b',
+        ],
+        'database_error': [
+            r'\b(database|db|sql|mysql|postgres|mongo|mariadb|oracle|sqlite|redis|cassandra|dynamodb)\b.*\b(error|fail|exception)\b',
+            r'\b(query|insert|update|delete|select)\b.*\b(fail|error)\b',
+            r'\bsqlalchemy\b.*\b(error|exception)\b',
+            r'\bdeadlock\b',
+            r'\bforeign key constraint\b',
+        ],
+        
+        # HTTP/API errors
+        'http_client_error': [
+            r'\b4[0-9]{2}\b',  # 4xx status codes
+            r'\b(400|bad request)\b',
+            r'\b(401|unauthorized)\b',
+            r'\b(403|forbidden)\b',
+            r'\b(404|not found)\b',
+            r'\b(405|method not allowed)\b',
+            r'\b(429|too many requests|rate limit)\b',
+        ],
+        'http_server_error': [
+            r'\b5[0-9]{2}\b',  # 5xx status codes
+            r'\b(500|internal server error)\b',
+            r'\b(502|bad gateway)\b',
+            r'\b(503|service unavailable)\b',
+            r'\b(504|gateway timeout)\b',
+        ],
+        
+        # Authentication/Authorization
+        'auth_error': [
+            r'\b(auth|authentication|authorization)\b.*\b(fail|error|denied|invalid)\b',
+            r'\b(login|signin|sign-in)\b.*\b(fail|error|invalid)\b',
+            r'\b(permission|access)\s*(denied|forbidden)\b',
+            r'\bunauthorized\s*(access|request)?\b',
+            r'\b(invalid|expired|missing)\s*(token|session|credential|jwt|api.?key)\b',
+            r'\b(password|credential)\b.*\b(incorrect|invalid|wrong|mismatch)\b',
+        ],
+        
+        # Memory errors
+        'memory_error': [
+            r'\b(out of memory|oom|oom.?killer)\b',
+            r'\b(memory|heap|stack)\s*(overflow|exhausted|exceeded|limit)\b',
+            r'\bmemory\s*(allocation|alloc)\s*(fail|error)\b',
+            r'\b(gc|garbage collector)\b.*\b(overhead|pressure|fail)\b',
+            r'\bjava\.lang\.OutOfMemoryError\b',
+        ],
+        
+        # Network errors
+        'network_error': [
+            r'\b(network|socket|tcp|udp|http)\b.*\b(error|fail|timeout|refused|reset)\b',
+            r'\bconnection\s*(refused|reset|closed|timed?\s*out)\b',
+            r'\b(host|server|endpoint)\b.*\bunreachable\b',
+            r'\bdns\s*(resolution|lookup)?\s*(fail|error|timeout)\b',
+            r'\bssl\b.*\b(error|handshake|certificate)\b',
+            r'\beconnrefused|econnreset|etimedout|ehostunreach\b',
+        ],
+        
+        # Timeout errors (generic)
+        'timeout_error': [
+            r'\b(request|response|operation|execution)\s*(timeout|timed?\s*out)\b',
+            r'\bdeadline\s*(exceeded|expired)\b',
+            r'\b(read|write|connect)\s*timeout\b',
+            r'\bglobal timeout\b',
+        ],
+        
+        # I/O and disk errors
+        'io_error': [
+            r'\b(disk|storage|volume|filesystem|file\s*system)\b.*\b(error|fail|full)\b',
+            r'\b(read|write)\b.*\b(error|fail|io)\b',
+            r'\b(i/o|io)\s*(error|exception)\b',
+            r'\bno\s*space\s*left\b',
+            r'\b(permission|access)\s*denied\b.*\b(file|directory|path)\b',
+            r'\bfile\s*not\s*found\b',
+        ],
+        
+        # Null/Reference errors
+        'null_reference_error': [
+            r'\b(null|nil|none|undefined)\s*(pointer|reference)?\s*(exception|error|access)?\b',
+            r'\bNullPointerException\b',
+            r'\bTypeError:.*None\b',
+            r'\bAttributeError:.*NoneType\b',
+            r'\bundefined is not (a function|an object)\b',
+            r'\bcannot read propert(y|ies) of (null|undefined)\b',
+        ],
+        
+        # Crash/Fatal errors
+        'crash_error': [
+            r'\b(fatal|panic|crash|crashed)\b',
+            r'\b(segfault|segmentation fault|sigsegv|sigabrt|sigkill)\b',
+            r'\b(terminated|killed|aborted)\b',
+            r'\b(core dump|unhandled exception|uncaught error)\b',
+            r'\bprocess\s*(exit|died|killed)\b',
+        ],
+        
+        # Configuration errors
+        'config_error': [
+            r'\b(config|configuration|settings?)\b.*\b(error|invalid|missing|fail)\b',
+            r'\b(environment|env)\s*variable\b.*\b(missing|not set|undefined)\b',
+            r'\binvalid\s*(config|configuration|setting|parameter)\b',
+        ],
+        
+        # Validation errors
+        'validation_error': [
+            r'\b(validation|validate|validator)\b.*\b(error|fail|invalid)\b',
+            r'\binvalid\s*(input|data|format|type|value|argument|parameter)\b',
+            r'\b(schema|json|xml)\b.*\b(validation|parse)\b.*\b(error|fail)\b',
+            r'\btype\s*(error|mismatch)\b',
+        ],
+        
+        # Queue/Message errors
+        'queue_error': [
+            r'\b(queue|message|kafka|rabbitmq|sqs|redis)\b.*\b(error|fail|timeout|overflow)\b',
+            r'\b(consumer|producer|subscriber|publisher)\b.*\b(error|fail)\b',
+            r'\bmessage\s*(lost|dropped|rejected)\b',
+        ],
+        
+        # Rate limiting/Throttling
+        'rate_limit_error': [
+            r'\b(rate\s*limit|throttl|too many requests)\b',
+            r'\b429\b.*\b(error|response)\b',
+            r'\bquota\s*(exceeded|limit)\b',
+        ],
+        
+        # Dependency/Service errors
+        'dependency_error': [
+            r'\b(service|microservice|api|upstream|downstream)\b.*\b(unavailable|error|fail|timeout)\b',
+            r'\b(circuit\s*breaker|fallback)\b.*\b(open|triggered|activated)\b',
+            r'\bdependency\b.*\b(fail|error|unavailable)\b',
+        ],
+    }
+    
+    # Legacy keyword-based fallback (used when no regex matches)
+    ANOMALY_KEYWORDS = {
         'database_error': ['database', 'db', 'sql', 'mysql', 'postgres', 'mongo'],
         'timeout_error': ['timeout', 'timed out', 'deadline exceeded'],
-        'auth_error': ['auth', 'login', 'permission', 'denied', 'unauthorized', 
-                       'forbidden', '401', '403'],
+        'auth_error': ['auth', 'login', 'permission', 'denied', 'unauthorized', 'forbidden'],
         'memory_error': ['memory', 'oom', 'heap', 'allocation', 'out of memory'],
-        'network_error': ['network', 'socket', 'connection refused', 
-                          'unreachable', 'dns'],
+        'network_error': ['network', 'socket', 'connection refused', 'unreachable', 'dns'],
         'io_error': ['disk', 'storage', 'write', 'read', 'i/o', 'filesystem'],
         'null_reference_error': ['null', 'undefined', 'nil', 'none', 'missing'],
         'server_error': ['500', '502', '503', '504', 'service unavailable'],
@@ -270,30 +409,57 @@ class HelixService:
         return 0.0
     
     def _classify_anomaly_type(self, template: str) -> str:
-        """Derive anomaly type from template keywords."""
+        """
+        Derive anomaly type from template using regex patterns.
+        
+        Uses a two-phase approach:
+        1. Try regex patterns first (more accurate)
+        2. Fall back to keyword matching if no regex matches
+        
+        Returns the most specific anomaly type that matches.
+        """
         if not template:
             return "unknown"
         
         t = template.lower()
         
-        # Check for error indicators first
-        error_keywords = ['error', 'exception', 'failed', 'fatal', 'critical', 'crash']
-        is_error = any(kw in t for kw in error_keywords)
+        # Phase 1: Try regex patterns (more accurate matching)
+        for anomaly_type, patterns in self.ANOMALY_PATTERNS.items():
+            for pattern in patterns:
+                try:
+                    if re.search(pattern, t, re.IGNORECASE):
+                        return anomaly_type
+                except re.error:
+                    # Skip invalid patterns
+                    continue
         
-        if not is_error:
-            warning_keywords = ['warning', 'warn', 'timeout', 'slow', 'retry']
-            is_warning = any(kw in t for kw in warning_keywords)
-            if not is_warning:
-                return "rare_event"
+        # Phase 2: Check for general error/warning indicators
+        error_indicators = [
+            r'\b(error|err|exception|fail|failed|failure)\b',
+            r'\b(fatal|critical|severe|panic)\b',
+            r'\b(crash|crashed|abort|aborted)\b',
+        ]
+        is_error = any(re.search(p, t, re.IGNORECASE) for p in error_indicators)
         
-        # Classify by domain (order matters - more specific first)
-        for anomaly_type, keywords in self.ANOMALY_TYPES.items():
-            if all(kw in t for kw in keywords[:2]):  # Match first 2 keywords
-                return anomaly_type
+        warning_indicators = [
+            r'\b(warn|warning)\b',
+            r'\b(timeout|timed?\s*out)\b',
+            r'\b(slow|degraded|retry|retrying)\b',
+        ]
+        is_warning = any(re.search(p, t, re.IGNORECASE) for p in warning_indicators)
+        
+        if not is_error and not is_warning:
+            # Check for HTTP status codes that indicate issues
+            if re.search(r'\b[45][0-9]{2}\b', t):
+                return "http_error"
+            return "rare_event"
+        
+        # Phase 3: Keyword-based fallback
+        for anomaly_type, keywords in self.ANOMALY_KEYWORDS.items():
             if any(kw in t for kw in keywords):
                 return anomaly_type
         
-        return "general_error"
+        return "general_error" if is_error else "warning"
     
     def _get_transition_probability(self, from_cluster: int, to_cluster: int) -> float:
         """Get probability of transition from one cluster to another."""
