@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     
     # ===== APP METADATA =====
     app_name: str = "Sentry-AI"
-    version: str = "0.1.0"
-    codename: str = "Cyrus"
+    version: str = "0.2.0"
+    codename: str = "Helix"
     
     # ===== STORAGE PATHS =====
     data_dir: Path = Field(default=Path.home() / ".sentry-ai")
@@ -41,13 +41,13 @@ class Settings(BaseSettings):
     min_chunk_size: int = 50  # Don't create tiny chunks
     
     # ===== VECTOR SEARCH =====
-    top_k_results: int = 20  # Return top 20 most similar chunks
+    top_k_results: int = 25  # Return top 25 most similar chunks
     similarity_threshold: float = 0.25  # Minimum similarity score (0-1)
     use_reranking: bool = True  # Use BM25 reranking after vector search
     
     # ===== LLM SETTINGS =====
     ollama_host: str = "http://localhost:11434"
-    llm_model: str = "tinyllama:latest"
+    llm_model: str = "gemma3:1b"
     main_prompt: str = """
     <Role>
                     You are a cybersecurity expert with deep knowledge of NIST standards, frameworks, and best practices. 
@@ -58,7 +58,7 @@ class Settings(BaseSettings):
                     What information does Security Content Automation Protocol (SCAP) Version 1.2 Validation Program Test Requirements provide? (Section 3) ; SCAP validated modules; SCAP validation The authors, Melanie Cook, Stephen Quinn, and David Waltermire of the National Institute of Standards and Technology (NIST), and Dragos Prisaca of G2, Inc. would like to thank the many people who reviewed and contributed to this document, in particular, John Banghart of Microsoft who was the original author and pioneered the first SCAP Validation Program. The authors thank Matt Kerr, and Danny Haynes of the MITRE Corporation for their insightful technical contribution to the design of the SCAP 1.2 Validation Program and creation of original SCAP 1.2 validation test content. We also thank our document reviewers, Kelley Dempsey of NIST and Jeffrey Blank of the National Security Agency for their input. This publication is intended for NVLAP accredited laboratories conducting SCAP product and module testing for the program, vendors interested in receiving SCAP validation for their products or modules, and organizations deploying SCAP products in their environments. Accredited laboratories use the information in this report to guide their testing and ensure all necessary requirements are met by a product before recommending to NIST that the product be awarded the requested validation. Vendors may use the information in this report to understand the features that products and modules need in order to be eligible for an SCAP validation. Government agencies and integrators use the information to gain insight into the criteria required for SCAP validated products. The secondary audience for this publication includes end users, who can review the test requirements in order to understand the capabilities of SCAP validated products and gain knowledge about SCAP validation. OVAL and CVE are registered trademarks, and CCE, CPE, and OCIL are trademarks of The MITRE Corporation. Red Hat is a registered trademark of Red Hat, Inc. Windows operating system is registered trademark of Microsoft Corporation.
                     
     """
-    llm_temperature: float = 0.70  # Low = factual, High = creative
+    llm_temperature: float = 0.55  # Low = factual, High = creative
     llm_context_window: int = 2048  # Max tokens for context
     llm_max_tokens: int = 1024  # Max tokens in response
     llm_timeout: int = 60  # Seconds before timeout
