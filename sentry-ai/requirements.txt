@@ -30,3 +30,8 @@ python-multipart>=0.0.6
 # Encryption & HTTP (for integrations)
 cryptography>=41.0.0
 httpx>=0.25.0
+
+# Plotting
+plotly>=6.5.0
+pyvis>=0.2.1
+pm4py>=2.5.0
