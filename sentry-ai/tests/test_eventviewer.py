@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 import time
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent / "sentry-ai"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     import win32evtlog
