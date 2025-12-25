@@ -1,10 +1,9 @@
-<h1 align="center">SentryAI</h1>
+<h1>SentryAI</h1>
 
-<p align="center">
+<p>
   <strong>AI and Math powered Log Analysis & Root Cause Detection</strong>
 </p>
 
----
 
 ## Installation
 

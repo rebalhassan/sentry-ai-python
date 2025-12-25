@@ -28,11 +28,10 @@ class Settings(BaseSettings):
     cache_dir: Optional[Path] = Field(default=None)  # Made Optional
     
     # ===== EMBEDDING MODEL =====
-    # Upgraded to mpnet for +15% accuracy (MTEB: 64.0 vs 56.3)
     # Note: Changing model requires re-indexing all content
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
-    embedding_dimension: int = 384  # Output dimension of all-mpnet-base-v2
-    embedding_batch_size: int = 32  # Process this many chunks at once
+    embedding_dimension: int = 384 
+    embedding_batch_size: int = 32 
     
     # ===== CHUNKING STRATEGY =====
     # Increased for semantic chunking - groups complete log entries
