@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[str] = Field(default=None)  # From env: SENTRY_OPENROUTER_API_KEY
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "qwen/qwen3-coder:free"  # Default free model
-    use_cloud_llm: bool = True  # Toggle: False = Ollama (local), True = OpenRouter (cloud)
+    use_cloud_llm: bool = False  # Toggle: False = Ollama (local), True = OpenRouter (cloud)
     
     # ===== INDEXING =====
     max_file_size_mb: int = 100  # Skip files larger than this

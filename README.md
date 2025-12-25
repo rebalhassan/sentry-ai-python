@@ -1,32 +1,74 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/version-0.2.0-blue?style=for-the-badge" alt="Version"/>
-  <img src="https://img.shields.io/badge/codename-Helix-purple?style=for-the-badge" alt="Codename"/>
-  <img src="https://img.shields.io/badge/python-3.10+-green?style=for-the-badge&logo=python" alt="Python"/>
-  <img src="https://img.shields.io/badge/license-MIT-orange?style=for-the-badge" alt="License"/>
-</p>
-
-<h1 align="center">🛡️ Sentry-AI</h1>
+<h1 align="center">SentryAI</h1>
 
 <p align="center">
-  <strong>AI-Powered Log Analysis & Root Cause Detection</strong>
-</p>
-
-<p align="center">
-  <em>Analyze log files, detect anomalies, and find root causes — all running locally on your machine. Your data never leaves your system.</em>
+  <strong>AI and Math powered Log Analysis & Root Cause Detection</strong>
 </p>
 
 ---
 
-## 🎯 What is Sentry-AI?
+## Installation
 
-Sentry-AI is a log analysis tool that combines:
+### Prerequisites
+
+- **Python 3.10+**
+- **Ollama** (for local LLM) — [Install Ollama](https://ollama.ai/download)
+- **Packages in requirements.txt file**
+
+### Step 1: Clone the Repository
+
+```bash
+git clone https://github.com/rebalhassan/sentry-ai-python.git
+cd sentry-ai-python/sentry-ai
+```
+
+### Step 2: Create Virtual Environment
+
+```bash
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# macOS/Linux
+source venv/bin/activate
+```
+
+### Step 3: Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4: Install and Start Ollama and configure the model in config.py file
+
+```bash
+# Install a lightweight model (recommended for CPU)
+ollama pull gemma3:1b (or any other model you wanna use available in Ollama)
+```
+You have to configure the model in config.py file with the exact name of the model you installed you can find it using Ollama list command
+
+### Step 5: Run the Application
+
+**Chat Interface:**
+```bash
+streamlit run sentry/streamlit_app.py
+```
+
+**Anomaly Dashboard:**
+```bash
+streamlit run sentry/anomaly_dashboard.py
+```
+
+## What is SentryAI?
+
+SentryAI is a log analysis tool that combines:
 
 - **RAG (Retrieval Augmented Generation)** for intelligent log querying
 - **Helix Vector** — a novel DNA-like encoding system for log pattern mining
 - **Markov Chain Anomaly Detection** for identifying unusual log sequences
 - **Semantic Vector Search** for finding similar log entries
 
-Unlike cloud-based solutions, Sentry-AI can run entirely on your machine if you want to. Your logs, Your business.
+Unlike cloud-based solutions, SentryAI can run entirely on your machine if you want to. Your logs, Your business.
 
 ---
 
@@ -34,7 +76,7 @@ Unlike cloud-based solutions, Sentry-AI can run entirely on your machine if you 
 
 ### DNA Encoding: How It Works
 
-Sentry-AI uses a bioinformatics-inspired approach to log analysis. The **Helix Vector** system treats logs like genetic sequences:
+SentryAI uses a bioinformatics-inspired approach to log analysis. The **Helix Vector** system treats logs like genetic sequences:
 
 ```
 Raw Logs → Drain3 Clustering → Cluster IDs (DNA) → Markov Chain → Anomaly Detection
@@ -92,17 +134,17 @@ anomaly_score = 1 - effective_probability
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                              Sentry-AI                                   │
+│                              SentryAI                                   │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  ┌─────────────┐    ┌──────────────┐    ┌─────────────────────────────┐ │
-│  │   Streamlit │    │   Anomaly    │    │         FastAPI             │ │
-│  │   Chat UI   │    │  Dashboard   │    │    (Headless Mode)          │ │
-│  └──────┬──────┘    └──────┬───────┘    └─────────────┬───────────────┘ │
-│         │                  │                          │                  │
-│         └──────────────────┼──────────────────────────┘                  │
+│                                                                         │
+│   ┌─────────────┐    ┌──────────────┐                                   │
+│   │   Streamlit │    │   Anomaly    │                                   │
+│   │   Chat UI   │    │  Dashboard   │                                   │
+│   └──────┬──────┘    └──────┬───────┘                                   │
+│         │                  │                                            │
+│         └──────────────────┘                                            │
 │                            ▼                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │ 
 │  │                        RAG Service                                   │ │
 │  │   ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌─────────────────┐   │ │
 │  │   │ Embedder │  │ VectorStore│  │   LLM    │  │ Intent Classifier│  │ │
@@ -155,115 +197,12 @@ sentry-ai/
 
 ---
 
-## Installation
+## Configuration
 
-### Prerequisites
+All settings can be configured via `config.py` file in the core directory.
 
-- **Python 3.10+**
-- **Ollama** (for local LLM) — [Install Ollama](https://ollama.ai/download)
-- **Git**
 
-### Step 1: Clone the Repository
-
-```bash
-git clone https://github.com/yourusername/sentry-ai-python.git
-cd sentry-ai-python/sentry-ai
-```
-
-### Step 2: Create Virtual Environment
-
-```bash
-python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS/Linux
-source venv/bin/activate
-```
-
-### Step 3: Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Step 4: Install and Start Ollama
-
-```bash
-# Install a lightweight model (recommended for CPU)
-ollama pull gemma3:1b
-
-# Or for better quality (requires more RAM)
-ollama pull llama3:8b
-```
-
-### Step 5: Run the Application
-
-**Chat Interface:**
-```bash
-streamlit run sentry/streamlit_app.py
-```
-
-**Anomaly Dashboard:**
-```bash
-streamlit run sentry/anomaly_dashboard.py
-```
-
----
-
-## ⚙️ Configuration
-
-All settings can be configured via environment variables with the `SENTRY_` prefix.
-
-### Environment Variables
-
-Create a `.env` file in the `sentry/` directory:
-
-```env
-# ===== LLM SETTINGS =====
-SENTRY_LLM_MODEL=gemma3:1b              # Ollama model name
-SENTRY_OLLAMA_HOST=http://localhost:11434
-SENTRY_LLM_TEMPERATURE=0.55              # 0=factual, 1=creative
-SENTRY_LLM_MAX_TOKENS=1024
-
-# ===== OPENROUTER CLOUD (Optional) =====
-SENTRY_OPENROUTER_API_KEY=sk-or-v1-xxx   # Get from https://openrouter.ai/keys
-SENTRY_OPENROUTER_MODEL=qwen/qwen3-coder:free
-SENTRY_USE_CLOUD_LLM=FALSE                # true=cloud, false=local Ollama
-
-# ===== EMBEDDING MODEL =====
-SENTRY_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
-SENTRY_EMBEDDING_DIMENSION=384
-
-# ===== VECTOR SEARCH =====
-SENTRY_TOP_K_RESULTS=25                  # Number of results to return
-SENTRY_SIMILARITY_THRESHOLD=0.25         # Minimum similarity (0-1)
-SENTRY_USE_RERANKING=true                # BM25 reranking after vector search
-
-# ===== HELIX VECTOR (Anomaly Detection) =====
-SENTRY_HELIX_ENABLED=true
-SENTRY_HELIX_ANOMALY_THRESHOLD=0.20      # Transitions below this = anomaly
-SENTRY_HELIX_DRAIN_SIM_TH=0.4            # Drain3 similarity (lower = more clusters)
-SENTRY_HELIX_DRAIN_DEPTH=4               # Parse tree depth
-
-# Severity weights (used in anomaly scoring)
-SENTRY_HELIX_SEVERITY_FATAL=0.9
-SENTRY_HELIX_SEVERITY_CRITICAL=0.8
-SENTRY_HELIX_SEVERITY_ERROR=0.5
-SENTRY_HELIX_SEVERITY_WARNING=0.3
-
-# ===== STORAGE =====
-SENTRY_DATA_DIR=~/.sentry-ai             # Where to store data
-SENTRY_LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR
-
-# ===== INDEXING =====
-SENTRY_MAX_FILE_SIZE_MB=100              # Skip files larger than this
-SENTRY_CHUNK_SIZE=1000                   # Characters per chunk
-SENTRY_CHUNK_OVERLAP=100                 # Overlap between chunks
-```
-
-## 🚀 Usage
+## Usage
 
 ### Chat Interface
 
@@ -294,14 +233,15 @@ streamlit run sentry/anomaly_dashboard.py
 ```
 
 **Features:**
-- Upload log files or watch folders
+- Drag and drop or upload log files (supported formats: `.log`, `.txt`, `.csv`, `.out`, `.err`)
+- Watch folders for real-time log monitoring
 - Drain3 template mining
 - Transition probability heatmaps
 - Anomaly score distribution charts
 - Interactive template explorer
 - Vector search without LLM
 
-## 📊 Data Models
+## Data Models
 
 ### LogChunk (Core Unit)
 
@@ -341,7 +281,7 @@ The intent classifier routes queries to optimal data sources:
 
 ---
 
-## 🧪 Testing
+## Testing
 
 Run the test suite:
 
@@ -370,7 +310,7 @@ pytest tests/ --cov=sentry --cov-report=html
 | `test_log_watcher.py` | File system monitoring |
 
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **[Drain3](https://github.com/logpai/Drain3)** — Log parsing and template mining
 - **[Sentence-Transformers](https://www.sbert.net/)** — Semantic embeddings
