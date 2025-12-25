@@ -8,7 +8,7 @@
 <h1 align="center">🛡️ Sentry-AI</h1>
 
 <p align="center">
-  <strong>AI-Powered Local Log Analysis & Root Cause Detection</strong>
+  <strong>AI-Powered Log Analysis & Root Cause Detection</strong>
 </p>
 
 <p align="center">
@@ -19,19 +19,18 @@
 
 ## 🎯 What is Sentry-AI?
 
-Sentry-AI is a **privacy-first, local-first** log analysis tool that combines:
+Sentry-AI is a log analysis tool that combines:
 
 - **RAG (Retrieval Augmented Generation)** for intelligent log querying
 - **Helix Vector** — a novel DNA-like encoding system for log pattern mining
 - **Markov Chain Anomaly Detection** for identifying unusual log sequences
 - **Semantic Vector Search** for finding similar log entries
-- **LLM Integration** (local Ollama or cloud OpenRouter) for natural language answers
 
-Unlike cloud-based solutions, Sentry-AI runs entirely on your machine. Your logs, your analysis, your privacy.
+Unlike cloud-based solutions, Sentry-AI can run entirely on your machine if you want to. Your logs, Your business.
 
 ---
 
-## 🧬 The Science Behind Helix Vector
+## The Science Behind Helix Vector
 
 ### DNA Encoding: How It Works
 
@@ -52,7 +51,7 @@ Input:  "Connection timeout to 192.168.1.1:3306 after 30s"
 Output: Template: "Connection timeout to <*>:<*> after <*>s" → Cluster ID: 7
 ```
 
-This transforms millions of unique log lines into a manageable vocabulary of ~50-200 templates.
+This transforms millions of unique log lines into a manageable vocabulary of templates.
 
 #### 2. Markov Chain Transition Probabilities
 
@@ -71,32 +70,25 @@ P(8|5) = 0.02  → Rare transition (2% of the time) → ANOMALY!
 
 #### 3. Anomaly Scoring
 
-Each log entry receives an **anomaly score** based on:
+Each log entry receives an **anomaly score** combining statistical rarity and semantic severity:
 
-```python
-effective_probability = transition_probability * (1.0 - severity_weight)
-anomaly_score = 1.0 - effective_probability
+```
+effective_probability = transition_probability × (1 - severity_weight)
+anomaly_score = 1 - effective_probability
 ```
 
-Where:
-- **transition_probability**: How likely this log follows the previous one (from Markov chain)
-- **severity_weight**: Keyword-based penalty (ERROR=0.5, CRITICAL=0.8, FATAL=0.9)
-- **effective_probability**: Transition probability reduced by severity
+**How it works:**
+- **Rare transitions** (low `transition_probability`) → Higher anomaly score
+- **Severe keywords** (ERROR, CRITICAL, FATAL) → Higher `severity_weight` → Lower `effective_probability` → Higher anomaly score
+- Logs are flagged when `effective_probability < 0.20` (default threshold, you can change it in the config)
 
-Logs are flagged as anomalies when `effective_probability < threshold` (default: 0.20).
-
-### Mathematical Foundation
-
-| Concept | Formula | Description |
-|---------|---------|-------------|
-| Transition Probability | `P(j|i) = N(i→j) / Σ N(i→k)` | Conditional probability of cluster j following cluster i |
-| Effective Probability | `P_eff = P × (1 - S)` | Transition probability reduced by severity weight |
-| Anomaly Score | `A = 1 - P_eff = 1 - P × (1 - S)` | Combined transition rarity and severity |
-| Similarity Score | `cos(θ) = (A·B) / (‖A‖‖B‖)` | Cosine similarity for vector search |
+**Example:**
+- Normal log: `P=0.85`, `S=0.1` → `P_eff = 0.765` → `A = 0.235` (not flagged)
+- Anomalous log: `P=0.15`, `S=0.8` → `P_eff = 0.03` → `A = 0.97` (flagged!)
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -114,7 +106,7 @@ Logs are flagged as anomalies when `effective_probability < threshold` (default:
 │  │                        RAG Service                                   │ │
 │  │   ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌─────────────────┐   │ │
 │  │   │ Embedder │  │ VectorStore│  │   LLM    │  │ Intent Classifier│  │ │
-│  │   │(MiniLM)  │  │  (FAISS)   │  │(Ollama/  │  │   (Regex-based)  │  │ │
+│  │   │(MiniLM)  │  │  (FAISS)   │  │  Ollama/ │  │   (Regex-based)  │  │ │
 │  │   │          │  │            │  │OpenRouter│  │                  │  │ │
 │  │   └──────────┘  └────────────┘  └──────────┘  └─────────────────┘   │ │
 │  └─────────────────────────────────────────────────────────────────────┘ │
@@ -141,54 +133,29 @@ Logs are flagged as anomalies when `effective_probability < threshold` (default:
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 sentry-ai/
 ├── sentry/                     # Main application package
-│   ├── core/                   # Core infrastructure
-│   │   ├── config.py           # All settings & environment variables
-│   │   ├── models.py           # Pydantic data models (LogChunk, QueryResult, etc.)
-│   │   ├── database.py         # SQLite database operations
-│   │   └── security.py         # Input sanitization & API key management
-│   │
-│   ├── services/               # Business logic services
-│   │   ├── rag.py              # RAG orchestrator (main entry point)
-│   │   ├── helix.py            # Helix Vector: Drain3 + Markov chain anomaly detection
-│   │   ├── embedding.py        # Sentence-transformers embedding service
-│   │   ├── vectorstore.py      # FAISS vector database
-│   │   ├── llm.py              # LLM client (Ollama local / OpenRouter cloud)
-│   │   ├── indexer.py          # Log file parser & chunking
-│   │   ├── intent.py           # Query intent classification
-│   │   ├── log_watcher.py      # File system watcher for live logs
-│   │   └── eventviewer.py      # Windows Event Viewer integration
-│   │
-│   ├── integrations/           # External service integrations
-│   │   ├── base.py             # Base integration class
-│   │   ├── vercel.py           # Vercel logs integration
-│   │   ├── posthog.py          # PostHog analytics integration
-│   │   └── datadog.py          # DataDog logs integration
-│   │
-│   ├── ui/                     # UI components
-│   │
-│   ├── streamlit_app.py        # Main chat interface
-│   ├── anomaly_dashboard.py    # Dedicated anomaly detection dashboard
-│   └── cli.py                  # Command line interface
+│   ├── core/                   # Foundation: config, data models, database, security
+│   ├── services/               # All system services: RAG, Helix, LLM, embeddings, etc.
+│   ├── integrations/           # External log sources (Vercel, PostHog, DataDog)
+│   ├── streamlit_app.py        # Chat interface
+│   └── anomaly_dashboard.py    # Anomaly detection dashboard
 │
-├── tests/                      # Test suite
-│   ├── test_helix.py           # Helix Vector tests
-│   ├── test_rag.py             # RAG service tests
-│   ├── test_embedding.py       # Embedding service tests
-│   ├── test_vectorstore.py     # Vector store tests
-│   └── ...
-│
-├── requirements.txt            # Python dependencies
-└── setup.py                    # Package installation
+├── tests/                      # Comprehensive test suite
+└── requirements.txt            # Python dependencies
 ```
+
+**Key Components:**
+- **`core/`**: Configuration (`config.py`), data models (`models.py`), database operations (`database.py`), and security utilities
+- **`services/`**: RAG orchestration, Helix Vector, LLM clients, embeddings, vector stores, indexing, and intent classification
+- **`integrations/`**: Connectors for external log platforms
 
 ---
 
-## 📦 Installation
+## Installation
 
 ### Prerequisites
 
@@ -263,7 +230,7 @@ SENTRY_LLM_MAX_TOKENS=1024
 # ===== OPENROUTER CLOUD (Optional) =====
 SENTRY_OPENROUTER_API_KEY=sk-or-v1-xxx   # Get from https://openrouter.ai/keys
 SENTRY_OPENROUTER_MODEL=qwen/qwen3-coder:free
-SENTRY_USE_CLOUD_LLM=true                # true=cloud, false=local Ollama
+SENTRY_USE_CLOUD_LLM=FALSE                # true=cloud, false=local Ollama
 
 # ===== EMBEDDING MODEL =====
 SENTRY_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
@@ -295,24 +262,6 @@ SENTRY_MAX_FILE_SIZE_MB=100              # Skip files larger than this
 SENTRY_CHUNK_SIZE=1000                   # Characters per chunk
 SENTRY_CHUNK_OVERLAP=100                 # Overlap between chunks
 ```
-
-### Configuration Reference
-
-| Category | Variable | Default | Description |
-|----------|----------|---------|-------------|
-| **LLM** | `SENTRY_LLM_MODEL` | `gemma3:1b` | Ollama model for generation |
-| **LLM** | `SENTRY_LLM_TEMPERATURE` | `0.55` | Creativity level (0-1) |
-| **LLM** | `SENTRY_USE_CLOUD_LLM` | `true` | Toggle cloud/local LLM |
-| **Cloud** | `SENTRY_OPENROUTER_API_KEY` | — | OpenRouter API key |
-| **Cloud** | `SENTRY_OPENROUTER_MODEL` | `qwen/qwen3-coder:free` | Cloud model to use |
-| **Embedding** | `SENTRY_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence transformer model |
-| **Search** | `SENTRY_TOP_K_RESULTS` | `25` | Max results per query |
-| **Search** | `SENTRY_SIMILARITY_THRESHOLD` | `0.25` | Min similarity score |
-| **Helix** | `SENTRY_HELIX_ANOMALY_THRESHOLD` | `0.20` | Anomaly detection threshold |
-| **Helix** | `SENTRY_HELIX_DRAIN_SIM_TH` | `0.4` | Drain3 clustering threshold |
-| **Storage** | `SENTRY_DATA_DIR` | `~/.sentry-ai` | Data directory path |
-
----
 
 ## 🚀 Usage
 
