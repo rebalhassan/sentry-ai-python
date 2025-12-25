@@ -74,21 +74,24 @@ P(8|5) = 0.02  → Rare transition (2% of the time) → ANOMALY!
 Each log entry receives an **anomaly score** based on:
 
 ```python
-anomaly_score = (1 - transition_probability) + severity_weight
+effective_probability = transition_probability * (1.0 - severity_weight)
+anomaly_score = 1.0 - effective_probability
 ```
 
 Where:
 - **transition_probability**: How likely this log follows the previous one (from Markov chain)
 - **severity_weight**: Keyword-based penalty (ERROR=0.5, CRITICAL=0.8, FATAL=0.9)
+- **effective_probability**: Transition probability reduced by severity
 
-Logs are flagged as anomalies when `anomaly_score > threshold` (default: 0.20).
+Logs are flagged as anomalies when `effective_probability < threshold` (default: 0.20).
 
 ### Mathematical Foundation
 
 | Concept | Formula | Description |
 |---------|---------|-------------|
 | Transition Probability | `P(j|i) = N(i→j) / Σ N(i→k)` | Conditional probability of cluster j following cluster i |
-| Anomaly Score | `A = (1 - P) + S` | Combined transition rarity and severity |
+| Effective Probability | `P_eff = P × (1 - S)` | Transition probability reduced by severity weight |
+| Anomaly Score | `A = 1 - P_eff = 1 - P × (1 - S)` | Combined transition rarity and severity |
 | Similarity Score | `cos(θ) = (A·B) / (‖A‖‖B‖)` | Cosine similarity for vector search |
 
 ---
@@ -343,26 +346,11 @@ streamlit run sentry/anomaly_dashboard.py
 
 **Features:**
 - Upload log files or watch folders
-- Real-time Drain3 template mining
+- Drain3 template mining
 - Transition probability heatmaps
 - Anomaly score distribution charts
 - Interactive template explorer
 - Vector search without LLM
-
-### API Mode
-
-For headless/programmatic use:
-
-```bash
-uvicorn sentry.api:app --host 0.0.0.0 --port 8000
-```
-
-**Endpoints:**
-- `POST /api/query` — RAG query
-- `POST /api/index` — Index new logs
-- `GET /api/stats` — System statistics
-
----
 
 ## 📊 Data Models
 
@@ -432,65 +420,6 @@ pytest tests/ --cov=sentry --cov-report=html
 | `test_database.py` | SQLite operations |
 | `test_log_watcher.py` | File system monitoring |
 
----
-
-## 🔧 Troubleshooting
-
-### Ollama Not Running
-
-```
-Error: Connection refused to http://localhost:11434
-```
-
-**Solution:** Start Ollama:
-```bash
-ollama serve
-```
-
-### Model Not Found
-
-```
-Error: Model 'gemma3:1b' not found
-```
-
-**Solution:** Pull the model:
-```bash
-ollama pull gemma3:1b
-```
-
-### CUDA Out of Memory
-
-**Solution:** Use a smaller model or CPU mode:
-```env
-SENTRY_LLM_MODEL=gemma3:1b  # Smaller model
-```
-
-### Slow Embedding
-
-**Solution:** Reduce batch size:
-```env
-SENTRY_EMBEDDING_BATCH_SIZE=16
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
----
 
 ## 🙏 Acknowledgments
 
@@ -500,9 +429,3 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - **[Ollama](https://ollama.ai/)** — Local LLM inference
 - **[OpenRouter](https://openrouter.ai/)** — Cloud LLM access
 - **[Streamlit](https://streamlit.io/)** — UI framework
-
----
-
-<p align="center">
-  <strong>Built with ❤️ for privacy-conscious developers who want AI-powered log analysis without cloud dependencies.</strong>
-</p>
