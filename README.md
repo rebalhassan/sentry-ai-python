@@ -1,15 +1,23 @@
 <h1>SentryAI</h1>
 
 <p>
-  <strong>AI and Math powered Log Analysis & Root Cause Detection</strong>
+  <strong>AI and Math powered Log Analysis Tool</strong>
 </p>
 
 
-<p>Follow me on <a href="https://x.com/rebalhassan">X</a> I might post about this project there</p>
+<p>Follow me on <a href="https://x.com/rebalhassan">X(@rebalhassan)</a> I might post about this project there</p>
 
-![Anomaly Dashboard](<sentry-ai/assets/Anomalydashboard.png>)
+<figure>
+  <img src="sentry-ai/assets/Anomalydashboard.png" alt="Anomaly Dashboard">
+  <figcaption><em>Anomaly Dashboard — Visualize log patterns, Markov chain transitions, and anomaly scores</em></figcaption>
+</figure>
+
 ---
-![RAG Chat Interface(btw this is a 1b model)](<sentry-ai/assets/Screenshot 2025-12-20 000550.png>)
+
+<figure>
+  <img src="sentry-ai/assets/Screenshot 2025-12-20 000550.png" alt="RAG Chat Interface">
+  <figcaption><em>RAG Chat Interface — Chat with your logs. This screenshot is me chatting with a local 1B parameter model</em></figcaption>
+</figure>
 
 ## Installation
 
