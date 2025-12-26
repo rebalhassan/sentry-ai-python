@@ -4,6 +4,9 @@
   <strong>AI and Math powered Log Analysis & Root Cause Detection</strong>
 </p>
 
+
+<p>Follow me on <a href="https://x.com/rebalhassan">X</a> I might post about this project there</p>
+
 ![Anomaly Dashboard](<sentry-ai/assets/Anomaly_Dashboard.png>)
 ---
 ![RAG Chat Interface(btw this is a 1b model)](<sentry-ai/assets/Screenshot 2025-12-20 000550.png>)
