@@ -17,6 +17,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dateutil import parser as date_parser
 
 from ..core.models import LogChunk, LogLevel
@@ -37,7 +38,7 @@ class LogIndexer:
     - Windows Event Viewer PyEventLogRecord objects
     """
     
-    # Regex patterns for log levels (case-insensitive)
+    # Regex patterns for log levels (case-insensitive) - pre-compiled at class level
     LEVEL_PATTERNS = {
         LogLevel.CRITICAL: re.compile(r'\b(CRITICAL|CRIT|FATAL|SEVERE)\b', re.I),
         LogLevel.ERROR: re.compile(r'\b(ERROR|ERR|FAIL|FAILED)\b', re.I),
@@ -45,6 +46,28 @@ class LogIndexer:
         LogLevel.INFO: re.compile(r'\b(INFO|INFORMATION)\b', re.I),
         LogLevel.DEBUG: re.compile(r'\b(DEBUG|DBG|TRACE)\b', re.I),
     }
+    
+    # Pre-compiled log entry patterns for semantic chunking (compiled once at class level)
+    # Detects entry boundaries using timestamps, log levels, and event formats
+    _LOG_ENTRY_PATTERNS = [
+        # ISO datetime: 2024-01-15 10:30:45 or 2024-01-15T10:30:45
+        r'^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}',
+        # Bracket datetime: [2024-01-15 10:30:45]
+        r'^\[\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}\]',
+        # Time only: [10:30:45] or 10:30:45,123
+        r'^\[?\d{2}:\d{2}:\d{2}[,.]?\d*\]?',
+        # Month format: Jan 15 10:30:45 or 15/Jan/2024
+        r'^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}',
+        r'^\d{1,2}/[A-Z][a-z]{2}/\d{4}',
+        # Log level at start: INFO, ERROR, WARN, DEBUG
+        r'^(INFO|ERROR|WARN|WARNING|DEBUG|CRITICAL|FATAL|TRACE)\s*[:\|\-\]]',
+        # Windows Event format: [Event ID: 1234]
+        r'^\[Event\s+ID:\s*\d+\]',
+    ]
+    _COMPILED_ENTRY_PATTERN = re.compile(
+        '|'.join(f'({p})' for p in _LOG_ENTRY_PATTERNS), 
+        re.MULTILINE | re.IGNORECASE
+    )
     
     # Windows Event Viewer event type mapping
     # EventType values from win32evtlog
@@ -56,19 +79,25 @@ class LogIndexer:
         16: LogLevel.WARNING,   # EVENTLOG_AUDIT_FAILURE
     }
     
-    def parse_file(self, file_path: Path, source_id: str) -> List[LogChunk]:
+    def parse_file(
+        self, 
+        file_path: Path, 
+        source_id: str,
+        skip_helix: bool = False
+    ) -> List[LogChunk]:
         """
         Parse a single log file into LogChunk objects.
         
         Chunks are automatically annotated with Helix Vector metadata
-        (cluster IDs, anomaly scores, severity weights).
+        (cluster IDs, anomaly scores, severity weights) unless skip_helix=True.
         
         Args:
             file_path: Path to the log file (.log, .txt, .csv)
             source_id: ID of the LogSource this file belongs to
+            skip_helix: If True, skip Helix annotation (used for batch processing)
             
         Returns:
-            List of LogChunk objects with Helix annotations
+            List of LogChunk objects (with Helix annotations if skip_helix=False)
             
         Raises:
             FileNotFoundError: If file doesn't exist
@@ -94,42 +123,100 @@ class LogIndexer:
         else:
             raise ValueError(f"Unsupported file extension: {extension}")
         
-        # Annotate with Helix Vector
-        return self._annotate_with_helix(chunks)
+        # Annotate with Helix Vector (skip if doing batch annotation later)
+        if not skip_helix:
+            return self._annotate_with_helix(chunks)
+        return chunks
     
     def parse_folder(self, folder_path: Path, source_id: str) -> List[LogChunk]:
         """
-        Recursively parse all supported log files in a folder
+        Recursively parse all supported log files in a folder.
+        
+        Uses parallel processing with ThreadPoolExecutor for faster indexing.
+        Helix annotation is applied once at the end for the entire batch,
+        which provides better Markov chain learning from the full sequence.
         
         Args:
             folder_path: Path to the folder containing log files
             source_id: ID of the LogSource this folder belongs to
             
         Returns:
-            List of LogChunk objects from all files
+            List of LogChunk objects from all files with Helix annotations
         """
         if not folder_path.exists() or not folder_path.is_dir():
             raise ValueError(f"Invalid folder path: {folder_path}")
         
-        all_chunks = []
-        
-        # Find all supported files
+        # Collect all files to process
+        files_to_process = []
         for ext in settings.supported_extensions:
             for file_path in folder_path.rglob(f"*{ext}"):
                 # Skip files that are too large
                 if settings.is_file_too_large(file_path):
                     logger.warning("Skipping large file: %s", file_path)
                     continue
+                files_to_process.append(file_path)
+        
+        if not files_to_process:
+            logger.info("No supported files found in %s", folder_path)
+            return []
+        
+        all_chunks = []
+        failed_files = []
+        
+        # Use parallel processing if enabled and multiple files exist
+        if settings.parallel_indexing and len(files_to_process) > 1:
+            # Determine worker count (max_workers, but at least 1)
+            num_workers = max(1, min(settings.max_workers, len(files_to_process)))
+            logger.info(
+                "Parallel indexing %d files with %d workers", 
+                len(files_to_process), num_workers
+            )
+            
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # Submit all file parsing jobs (skip_helix=True for batch annotation)
+                future_to_file = {
+                    executor.submit(
+                        self.parse_file, file_path, source_id, True
+                    ): file_path 
+                    for file_path in files_to_process
+                }
                 
+                # Collect results as they complete
+                for future in as_completed(future_to_file):
+                    file_path = future_to_file[future]
+                    try:
+                        chunks = future.result()
+                        all_chunks.extend(chunks)
+                    except Exception as e:
+                        # Log error but continue processing other files
+                        logger.warning("Error parsing %s: %s", file_path, e)
+                        failed_files.append((file_path, str(e)))
+                        continue
+        else:
+            # Sequential processing (single file or parallel disabled)
+            for file_path in files_to_process:
                 try:
-                    # parse_file already applies Helix annotation
-                    chunks = self.parse_file(file_path, source_id)
+                    chunks = self.parse_file(file_path, source_id, skip_helix=True)
                     all_chunks.extend(chunks)
                 except Exception as e:
                     logger.warning("Error parsing %s: %s", file_path, e)
+                    failed_files.append((file_path, str(e)))
                     continue
         
-        return all_chunks
+        # Log summary
+        if failed_files:
+            logger.warning(
+                "Completed with %d errors out of %d files", 
+                len(failed_files), len(files_to_process)
+            )
+        else:
+            logger.info(
+                "Successfully parsed %d files, %d chunks", 
+                len(files_to_process), len(all_chunks)
+            )
+        
+        # Apply Helix annotation to ALL chunks at once (better Markov learning)
+        return self._annotate_with_helix(all_chunks)
     
     def parse_file_incremental(
         self, 
@@ -370,7 +457,9 @@ class LogIndexer:
     
     def _split_into_log_entries(self, content: str) -> List[str]:
         """
-        Split content into individual log entries based on common patterns
+        Split content into individual log entries based on common patterns.
+        
+        Uses pre-compiled regex patterns at class level for performance.
         
         Detects entry boundaries using:
         - ISO timestamps (2024-01-15 10:30:45)
@@ -378,34 +467,14 @@ class LogIndexer:
         - Log levels at start of line (INFO, ERROR, etc.)
         - Windows Event format
         """
-        # Common log entry start patterns
-        LOG_ENTRY_PATTERNS = [
-            # ISO datetime: 2024-01-15 10:30:45 or 2024-01-15T10:30:45
-            r'^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}',
-            # Bracket datetime: [2024-01-15 10:30:45]
-            r'^\[\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}\]',
-            # Time only: [10:30:45] or 10:30:45,123
-            r'^\[?\d{2}:\d{2}:\d{2}[,.]?\d*\]?',
-            # Month format: Jan 15 10:30:45 or 15/Jan/2024
-            r'^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}',
-            r'^\d{1,2}/[A-Z][a-z]{2}/\d{4}',
-            # Log level at start: INFO, ERROR, WARN, DEBUG
-            r'^(INFO|ERROR|WARN|WARNING|DEBUG|CRITICAL|FATAL|TRACE)\s*[:\|\-\]]',
-            # Windows Event format: [Event ID: 1234]
-            r'^\[Event\s+ID:\s*\d+\]',
-        ]
-        
-        # Compile patterns
-        combined_pattern = '|'.join(f'({p})' for p in LOG_ENTRY_PATTERNS)
-        entry_start_regex = re.compile(combined_pattern, re.MULTILINE | re.IGNORECASE)
-        
+        # Use pre-compiled class-level pattern (self._COMPILED_ENTRY_PATTERN)
         lines = content.split('\n')
         entries = []
         current_entry_lines = []
         
         for line in lines:
-            # Check if this line starts a new entry
-            if entry_start_regex.match(line.strip()):
+            # Check if this line starts a new entry using pre-compiled pattern
+            if self._COMPILED_ENTRY_PATTERN.match(line.strip()):
                 # Save previous entry if exists
                 if current_entry_lines:
                     entry_text = '\n'.join(current_entry_lines).strip()

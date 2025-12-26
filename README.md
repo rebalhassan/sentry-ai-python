@@ -4,9 +4,9 @@
   <strong>AI and Math powered Log Analysis & Root Cause Detection</strong>
 </p>
 
+![Anomaly Dashboard](<sentry-ai/assets/Anomaly_Dashboard.png>)
+---
 ![RAG Chat Interface(btw this is a 1b model)](<sentry-ai/assets/Screenshot 2025-12-20 000550.png>)
-
-![Anomaly Dashboard](<sentry-ai/assets/Anomaly Dashboard.png>)
 
 ## Installation
 
@@ -238,6 +238,7 @@ streamlit run sentry/anomaly_dashboard.py
 
 **Screenshots:**
 ![Anomaly Dashboard](<sentry-ai/assets/Screenshot 2025-12-23 235912.png>)
+---
 ![Anomaly Dashboard](<sentry-ai/assets/Screenshot 2025-12-23 235610.png>)
 
 ## Data Models

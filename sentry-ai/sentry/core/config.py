@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Note: Changing model requires re-indexing all content
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384 
-    embedding_batch_size: int = 32 
+    embedding_batch_size: int = 64  # Increased from 32 for better CPU throughput
     
     # ===== CHUNKING STRATEGY =====
     # Increased for semantic chunking - groups complete log entries
