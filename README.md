@@ -236,11 +236,6 @@ streamlit run sentry/anomaly_dashboard.py
 - Interactive template explorer
 - Vector search without LLM
 
-**Screenshots:**
-![Anomaly Dashboard](<sentry-ai/assets/Screenshot 2025-12-23 235912.png>)
----
-![Anomaly Dashboard](<sentry-ai/assets/Screenshot 2025-12-23 235610.png>)
-
 ## Data Models
 
 ### LogChunk (Core Unit)

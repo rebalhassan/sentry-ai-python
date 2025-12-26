@@ -546,15 +546,32 @@ class LogIndexer:
     
     def _chunk_by_sentences(self, content: str) -> List[str]:
         """
-        Fallback: Split by sentences for unstructured text
+        Fallback: Split by sentences for unstructured text.
         
         Uses common sentence-ending patterns and respects word boundaries.
+        If no sentence boundaries are found, falls back to character-based
+        chunking with overlap.
         """
         # Sentence-ending patterns
         sentence_endings = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
         
         # Split into sentences
         sentences = sentence_endings.split(content)
+        
+        # If no sentence boundaries found (single chunk), use character-based chunking
+        if len(sentences) <= 1 and len(content) > settings.chunk_size:
+            # Character-based chunking with overlap
+            chunks = []
+            start = 0
+            while start < len(content):
+                end = min(start + settings.chunk_size, len(content))
+                chunks.append(content[start:end])
+                # Move forward by (chunk_size - overlap)
+                start += settings.chunk_size - settings.chunk_overlap
+                # Avoid infinite loop if overlap >= chunk_size
+                if start <= end - settings.chunk_size:
+                    start = end
+            return chunks
         
         if not sentences:
             return [content] if content.strip() else []

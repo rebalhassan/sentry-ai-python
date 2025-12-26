@@ -1,6 +1,10 @@
 # test_embedding.py
 """Test the embedding service"""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import time
 from sentry.services.embedding import EmbeddingService
 

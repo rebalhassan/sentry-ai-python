@@ -4,9 +4,12 @@ Test the Log Watcher Service
 Tests file monitoring, debouncing, and incremental indexing
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import time
 import tempfile
-from pathlib import Path
 
 from sentry.core import LogSource, SourceType
 from sentry.services.indexer import LogIndexer

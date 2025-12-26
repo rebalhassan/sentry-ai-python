@@ -1,6 +1,10 @@
 # test_llm.py
 """Test the LLM client"""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from datetime import datetime
 from sentry.services.llm import LLMClient
 from sentry.core.models import LogChunk, LogLevel

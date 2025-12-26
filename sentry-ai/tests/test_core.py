@@ -1,6 +1,10 @@
 # test_core.py
 """Quick test to verify core models work"""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from sentry.core import LogSource, LogChunk, SourceType, LogLevel, settings
 from datetime import datetime
 

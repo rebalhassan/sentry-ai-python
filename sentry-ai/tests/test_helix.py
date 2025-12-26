@@ -3,6 +3,10 @@
 Test the Helix Vector service - DNA encoding and anomaly detection
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from datetime import datetime
 from sentry.services.helix import HelixService, get_helix_service
 from sentry.core.models import LogChunk, LogLevel

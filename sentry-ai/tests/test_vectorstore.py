@@ -1,8 +1,11 @@
 # test_vectorstore.py
 """Test the vector store"""
 
-import numpy as np
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import numpy as np
 from sentry.services.embedding import EmbeddingService
 from sentry.services.vectorstore import VectorStore
 

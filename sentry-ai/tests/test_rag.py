@@ -1,6 +1,10 @@
 # test_rag.py
 """Test the complete RAG pipeline"""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from datetime import datetime
 from sentry.services.rag import RAGService
 from sentry.core.models import LogChunk, LogLevel, LogSource, SourceType
