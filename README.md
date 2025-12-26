@@ -62,7 +62,7 @@ streamlit run sentry/anomaly_dashboard.py
 
 SentryAI is a log analysis tool that combines:
 
-- **RAG (Retrieval Augmented Generation)** for intelligent log querying
+- **RAG (Retrieval Augmented Generation)** for chatting with your logs
 - **Helix Vector** — a novel DNA-like encoding system for log pattern mining
 - **Markov Chain Anomaly Detection** for identifying unusual log sequences
 - **Semantic Vector Search** for finding similar log entries
@@ -180,8 +180,7 @@ anomaly_score = 1 - effective_probability
 sentry-ai/
 ├── sentry/                     # Main application package
 │   ├── core/                   # Foundation: config, data models, database, security
-│   ├── services/               # All system services: RAG, Helix, LLM, embeddings, etc.
-│   ├── integrations/           # External log sources (Vercel, PostHog, DataDog)
+│   ├── services/               # All system services: RAG, Helix, LLM, embeddings, etc.         
 │   ├── streamlit_app.py        # Chat interface
 │   └── anomaly_dashboard.py    # Anomaly detection dashboard
 │
@@ -192,7 +191,6 @@ sentry-ai/
 **Key Components:**
 - **`core/`**: Configuration (`config.py`), data models (`models.py`), database operations (`database.py`), and security utilities
 - **`services/`**: RAG orchestration, Helix Vector, LLM clients, embeddings, vector stores, indexing, and intent classification
-- **`integrations/`**: Connectors for external log platforms
 
 ---
 
@@ -212,16 +210,11 @@ streamlit run sentry/streamlit_app.py
 ```
 
 **Features:**
-- Natural language queries about your logs
+- Chat with your logs
 - Automatic intent detection (errors, patterns, frequencies, etc.)
-- Source citation for each answer
+- Dual-vector system with routing based off intent
 - Toggle between local (Ollama) and cloud (OpenRouter) LLM
 
-**Example Queries:**
-- "What errors occurred in the last hour?"
-- "Why did the database timeout happen?"
-- "Show me the most common log patterns"
-- "Find logs similar to 'connection refused'"
 
 ### Anomaly Dashboard
 
